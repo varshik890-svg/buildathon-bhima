@@ -1,4 +1,4 @@
-"""Task -> ContextPack: the text a worker sees before it starts.
+﻿"""Task -> ContextPack: the text a worker sees before it starts.
 
 The pack is built to fit a token budget (estimated at 4 chars/token):
   1. Task statement and acceptance criteria
@@ -35,12 +35,13 @@ FIELD_WEIGHTS = {"path": 3, "symbols": 2, "body": 1}
 K1, B = 1.5, 0.75
 HINT_BONUS = 100.0  # files_hint always wins
 DEF_BONUS = 8.0     # the task names a function/class this file defines
+MENTION_BONUS = 25.0  # the task text names this file (e.g. "fix invoice/pricing.py")
 TEST_PRIOR = 0.6    # code tasks: edit the implementation; its test is pulled in by pairing
 DOC_PRIOR = 0.5     # code tasks: prose files rarely need editing
 STOP = set("""a an and are as at be by can do does for from has have how i if in into is it its
 of on or our should so that the their them then there this to up use we what when where which
 with would you your make sure add new get set all any each not no task file files code please
-self def return none true false import class""".split())
+self def return none true false import class str int float list dict bool py""".split())
 
 
 def est_tokens(text: str) -> int:
@@ -208,9 +209,9 @@ def rank_files(task, root: Path, files: list[Path] | None = None,
     query = list(surface)
     bm = BM25(docs)
     hints = [_norm_hint(h) for h in (task.files_hint or []) if h.strip()]
-    # Whole identifiers in the task ("parse_price", "route") -> definition lookup.
-    q_idents = {w.lower() for w in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", qtext)}
-    wants_tests = bool(re.search(r"\btests?\b|pytest", qtext, re.I))
+    prose = " ".join([task.title, task.detail or "", " ".join(task.acceptance or [])])
+    # Exact identifiers in the task ("line_total", "LineItem") -> definition lookup.
+    q_idents = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]{3,}", prose))
     kind = getattr(task, "kind", "code")
     ranked = []
     for rel in docs:
@@ -219,15 +220,15 @@ def rank_files(task, root: Path, files: list[Path] | None = None,
         if contrib:
             top = sorted(contrib.items(), key=lambda kv: -kv[1])[:4]
             why.append("matches " + ", ".join(f"'{surface.get(t, t)}'" for t, _ in top))
-        defined = [n for n in (_sym_name(x) for x in syms[rel]) if n.lower() in q_idents]
+        defined = [n for n in (_sym_name(x) for x in syms[rel]) if n in q_idents]
         if defined:
             s += DEF_BONUS * len(defined[:3])
-            why.insert(0, "defines " + ", ".join(f"{n}" for n in defined[:3]))
+            why.insert(0, "defines " + ", ".join(defined[:3]))
         is_test = "/tests/" in "/" + rel or Path(rel).name.startswith("test_")
         if kind == "code" and s > 0:
-            if is_test and not wants_tests:
+            if is_test:
                 s *= TEST_PRIOR
-                why.append("test file (ranked below the code it tests)")
+                why.append("test file (kept just below the code it tests)")
             elif rel.endswith((".md", ".txt", ".rst")):
                 s *= DOC_PRIOR
                 why.append("docs (code task)")
@@ -237,23 +238,27 @@ def rank_files(task, root: Path, files: list[Path] | None = None,
         elif any(h and Path(h).name == Path(rel).name for h in hints):
             s += HINT_BONUS / 2
             why.insert(0, "same filename as a files_hint")
+        elif re.search(rf"(?<![\w/]){re.escape(rel)}\b", prose) or \
+                re.search(rf"(?<![\w.]){re.escape(Path(rel).name)}\b", prose):
+            s += MENTION_BONUS
+            why.insert(0, "file named in the task text")
         ranked.append({"path": rel, "score": s, "why": why})
     ranked.sort(key=lambda r: (-r["score"], r["path"]))
-    # Pair tests with their module: test_foo.py <-> foo.py
-    top_paths = [r["path"] for r in ranked[:3] if r["score"] > 0]
-    top_py = [Path(p).stem for p in top_paths if p.endswith(".py")]
-    top_modules = {s for s in top_py if not s.startswith("test_")}
-    top_tests = {s[5:] for s in top_py if s.startswith("test_")}
-    bonus = 0.5 * min(ranked[0]["score"], HINT_BONUS) if ranked else 0.0
-    for r in ranked:
-        if r["path"] in top_paths or not r["path"].endswith(".py"):
+    # Pair tests with their module (test_foo.py <-> foo.py): the partner of a
+    # top-3 file is lifted to sit right below it, so edits and tests travel together.
+    by_stem: dict[str, dict] = {}
+    for r in ranked[:3]:
+        if r["score"] > 0 and r["path"].endswith(".py"):
+            by_stem.setdefault(Path(r["path"]).stem, r)
+    for r in ranked[3:]:
+        if not r["path"].endswith(".py"):
             continue
         stem = Path(r["path"]).stem
-        is_test = stem.startswith("test_")
-        partner = stem[5:] if is_test else stem
-        if (is_test and partner in top_modules) or (not is_test and partner in top_tests):
-            r["score"] += bonus
-            r["why"].append(f"pairs with top file for '{partner}' (module/test)")
+        partner_stem = stem[5:] if stem.startswith("test_") else "test_" + stem
+        top = by_stem.get(partner_stem)
+        if top and r["score"] < top["score"] * 0.9:
+            r["score"] = top["score"] * 0.9
+            r["why"].append(f"pairs with {top['path']} (module/test)")
     ranked.sort(key=lambda r: (-r["score"], r["path"]))
     return ranked
 
