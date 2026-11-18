@@ -125,6 +125,19 @@ See [RULES.md](RULES.md) for the full list.
 
 > **Evaluators:** the [walkthrough below](#for-evaluators-walkthrough-and-testing) shows how to check everything in about 10 minutes: the test suite, a live run, the benchmark, and a code tour.
 
+### What is Bhima?
+
+**Bhima is a local-first AI setup for one developer's laptop.** Small local models do the cheap, constant work: planning, chatting and deciding. Subscription coding agents (Claude Code and Codex) do the heavy coding. A harness around all of them makes sure every result is **planned, routed, checked and approved** before it counts.
+
+The idea in one line: **local models plan, GLiDE routes, tests prove.**
+
+- **The Talker** is a local LLM that chats, plans and explains, with no subscription cost.
+- **GLiDE** is a local decision model that picks which agent, which model and how much effort each task gets.
+- **Claude Code and Codex** are the workers, used through the subscriptions you already have (no API keys).
+- **The Bhima harness** wraps them all with context ranking, hidden-test checks, human approval, memory and skills.
+
+**This repo is the hackathon build:** the harness core, built in 4 hours. It runs today with a small Talker (Qwen3-4B) and a small GLiDE (0.4B). The [roadmap](#future-goals-the-bhima-roadmap) below covers the full project.
+
 ### Problem: who has it and why it happens
 
 Developers who hand coding tasks to agents like **Claude Code** and **Codex** often get a first answer that is wrong, or only *looks* right. This isn't the model being lazy. There are three structural reasons:
@@ -283,3 +296,17 @@ Without them, Bhima falls back to Claude Haiku planning and rule routing.
 - Workers run on the host with fixed tools and a clean environment, but **without OS-level filesystem isolation**. The next step is to run them inside a bubblewrap jail (WSL2).
 - Git metadata in the workspace can be reached by the worker. The plan is a separate trusted checkout.
 - Native-Windows Codex blocks commands in non-interactive mode, so the Codex worker is meant to run from WSL.
+
+## Future goals: the Bhima roadmap
+
+The long-term aim: **a personal AI team on your own laptop that you can trust, because every result is proven, not just claimed.**
+
+1. **Three connected harnesses, one per model.** The Talker, Claude Code and Codex each get their own Bhima harness, and the three share a plan, memory and results. GLiDE sits inside the harness and decides who does what.
+2. **Bigger local models on the GPU.** A larger Talker (Qwen3.6-35B, quantized) for better plans and chat, and GLiDE-9B for sharper routing, both on the laptop's RTX 5080.
+3. **Real isolation.** Workers run inside an OS-level jail (bubblewrap on WSL2) with secrets and git metadata out of reach, and merges happen from a separate trusted checkout.
+4. **Memory and skills that grow.** Every approved task can add a lesson or a skill, Hermes-style but rebuilt in our own code, so the team gets better at *your* codebase over time.
+5. **A company-style dashboard.** A UI that shows what every agent is doing, what it costs in tokens and time, and where the setup could be optimised.
+6. **Public benchmarks.** Python exercises from the Aider polyglot benchmark, and a Bhima adapter for Harbor / Terminal-Bench 2.0, comparing Bhima against plain Claude Code and Codex.
+7. **Control from anywhere.** Telegram for plans, approvals and reports from your phone, with you always making the final call.
+
+The guiding rules stay the same: **local first, subscriptions only, a human approves, and tests decide what "done" means.**
