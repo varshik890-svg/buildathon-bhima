@@ -103,7 +103,8 @@ def proj(tmp_path):
 
 
 def test_tokenize_splits_identifiers():
-    assert context.tokenize("parsePrice apply_discount") == ["parse", "price", "apply", "discount"]
+    assert context._words("parsePrice apply_discount GLiDE") == ["parse", "price", "apply", "discount", "glide"]
+    assert context.tokenize("prices sorting parsed") == context.tokenize("price sort parse")
 
 
 def test_bm25_ranks_relevant_file_first_and_explains(proj):

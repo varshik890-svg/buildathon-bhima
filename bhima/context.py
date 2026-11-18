@@ -34,6 +34,9 @@ MAX_FILE_BYTES = 200_000
 FIELD_WEIGHTS = {"path": 3, "symbols": 2, "body": 1}
 K1, B = 1.5, 0.75
 HINT_BONUS = 100.0  # files_hint always wins
+DEF_BONUS = 8.0     # the task names a function/class this file defines
+TEST_PRIOR = 0.6    # code tasks: edit the implementation; its test is pulled in by pairing
+DOC_PRIOR = 0.5     # code tasks: prose files rarely need editing
 STOP = set("""a an and are as at be by can do does for from has have how i if in into is it its
 of on or our should so that the their them then there this to up use we what when where which
 with would you your make sure add new get set all any each not no task file files code please
@@ -44,24 +47,41 @@ def est_tokens(text: str) -> int:
     return (len(text) + CHARS_PER_TOKEN - 1) // CHARS_PER_TOKEN
 
 
-def tokenize(text: str) -> list[str]:
-    """Words, with identifiers split: parse_priceList -> parse, price, list."""
+_CAMEL = re.compile(r"[A-Za-z][a-z0-9]*(?:[A-Z][a-z0-9]+)+")
+
+
+def _words(text: str) -> list[str]:
+    """Surface words, identifiers split: parse_priceList -> parse, price, list.
+
+    Only clean camelCase is split; odd casing like 'GLiDE' stays one word."""
     out = []
     for raw in re.findall(r"[A-Za-z][A-Za-z0-9_]*|\d+", text):
-        parts = re.split(r"_+", raw)
-        for p in parts:
-            for w in re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|\d+", p):
+        for p in (x for x in raw.split("_") if x):
+            pieces = re.findall(r"[A-Z]?[a-z0-9]+", p) if _CAMEL.fullmatch(p) else [p]
+            for w in pieces:
                 w = w.lower()
                 if len(w) > 1 and w not in STOP:
-                    out.append(_stem(w))
+                    out.append(w)
     return out
 
 
+def tokenize(text: str) -> list[str]:
+    return [_stem(w) for w in _words(text)]
+
+
 def _stem(w: str) -> str:
-    """Tiny suffix stripper so 'prices'/'price', 'sorting'/'sort' meet."""
-    for suf in ("ing", "ers", "ies", "es", "ed", "s"):
-        if len(w) > len(suf) + 2 and w.endswith(suf):
-            return w[: -len(suf)] + ("y" if suf == "ies" else "")
+    """Tiny suffix stripper so price/prices, sort/sorting, parse/parsed meet."""
+    if len(w) <= 3 or w.isdigit():
+        return w
+    if w.endswith("ies") and len(w) > 4:
+        w = w[:-3] + "y"
+    else:
+        for suf in ("ing", "ed", "s"):
+            if w.endswith(suf) and not w.endswith("ss") and len(w) - len(suf) >= 3:
+                w = w[: -len(suf)]
+                break
+    if w.endswith("e") and len(w) > 3:
+        w = w[:-1]
     return w
 
 
@@ -155,6 +175,12 @@ def _doc_tokens(rel: str, symbols: list[str], body: str) -> list[str]:
     return toks
 
 
+def _sym_name(sym: str) -> str:
+    """'def parse_price(text)' -> 'parse_price'; 'class Cart [add]' -> 'Cart'."""
+    m = re.match(r"(?:def|class)\s+(\w+)", sym)
+    return m.group(1) if m else sym
+
+
 def _norm_hint(h: str) -> str:
     return h.replace("\\", "/").strip().lstrip("./")
 
@@ -174,17 +200,37 @@ def rank_files(task, root: Path, files: list[Path] | None = None,
         docs[rel] = _doc_tokens(rel, syms[rel], texts[rel])
     if not docs:
         return []
-    query = tokenize(" ".join([task.title, task.detail or "", " ".join(task.acceptance or []),
-                               " ".join(task.files_hint or [])]))
+    qtext = " ".join([task.title, task.detail or "", " ".join(task.acceptance or []),
+                      " ".join(task.files_hint or [])])
+    surface = {}
+    for w in _words(qtext):
+        surface.setdefault(_stem(w), w)
+    query = list(surface)
     bm = BM25(docs)
     hints = [_norm_hint(h) for h in (task.files_hint or []) if h.strip()]
+    # Whole identifiers in the task ("parse_price", "route") -> definition lookup.
+    q_idents = {w.lower() for w in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", qtext)}
+    wants_tests = bool(re.search(r"\btests?\b|pytest", qtext, re.I))
+    kind = getattr(task, "kind", "code")
     ranked = []
     for rel in docs:
         s, contrib = bm.score(query, rel)
         why = []
         if contrib:
             top = sorted(contrib.items(), key=lambda kv: -kv[1])[:4]
-            why.append("matches " + ", ".join(f"'{t}'" for t, _ in top))
+            why.append("matches " + ", ".join(f"'{surface.get(t, t)}'" for t, _ in top))
+        defined = [n for n in (_sym_name(x) for x in syms[rel]) if n.lower() in q_idents]
+        if defined:
+            s += DEF_BONUS * len(defined[:3])
+            why.insert(0, "defines " + ", ".join(f"{n}" for n in defined[:3]))
+        is_test = "/tests/" in "/" + rel or Path(rel).name.startswith("test_")
+        if kind == "code" and s > 0:
+            if is_test and not wants_tests:
+                s *= TEST_PRIOR
+                why.append("test file (ranked below the code it tests)")
+            elif rel.endswith((".md", ".txt", ".rst")):
+                s *= DOC_PRIOR
+                why.append("docs (code task)")
         if any(rel == h or rel.endswith("/" + h) or h.endswith("/" + rel) for h in hints):
             s += HINT_BONUS
             why.insert(0, "named in files_hint")
@@ -195,14 +241,17 @@ def rank_files(task, root: Path, files: list[Path] | None = None,
     ranked.sort(key=lambda r: (-r["score"], r["path"]))
     # Pair tests with their module: test_foo.py <-> foo.py
     top_paths = [r["path"] for r in ranked[:3] if r["score"] > 0]
-    stems = {Path(p).stem.removeprefix("test_") for p in top_paths if p.endswith(".py")}
+    top_py = [Path(p).stem for p in top_paths if p.endswith(".py")]
+    top_modules = {s for s in top_py if not s.startswith("test_")}
+    top_tests = {s[5:] for s in top_py if s.startswith("test_")}
     bonus = 0.5 * min(ranked[0]["score"], HINT_BONUS) if ranked else 0.0
     for r in ranked:
         if r["path"] in top_paths or not r["path"].endswith(".py"):
             continue
         stem = Path(r["path"]).stem
-        partner = stem[5:] if stem.startswith("test_") else stem
-        if partner in stems:
+        is_test = stem.startswith("test_")
+        partner = stem[5:] if is_test else stem
+        if (is_test and partner in top_modules) or (not is_test and partner in top_tests):
             r["score"] += bonus
             r["why"].append(f"pairs with top file for '{partner}' (module/test)")
     ranked.sort(key=lambda r: (-r["score"], r["path"]))
