@@ -14,7 +14,7 @@ import io
 import logging
 from typing import Any, Callable
 
-from . import config
+from . import config, talker
 
 log = logging.getLogger("bhima.telegram")
 
@@ -33,7 +33,8 @@ EVENT_ICONS = {
 
 HELP_TEXT = (
     "Bhima commands:\n"
-    "/ask <request> - plan and run a coding request (plain text works too)\n"
+    "/ask <request> - plan and run a coding request\n"
+    "Send a plain message to chat with Bhima's assistant.\n"
     "/status - what the harness is doing now\n"
     "/report - rounds, tokens and time\n"
     "/memory - current memory snapshot\n"
@@ -351,7 +352,12 @@ class BhimaBot:
     async def on_text(self, update: Any, context: Any) -> None:
         if not self._allowed(update):
             return
-        await self._submit(update, (update.effective_message.text or "").strip())
+        text = (update.effective_message.text or "").strip()
+        if text:
+            answer = await asyncio.to_thread(
+                talker.ask, text, system="You are Bhima's assistant. Keep replies short. /ask starts work."
+            )
+            await self._reply(update, answer or "Talker offline. Use /ask to start a task.")
 
     async def _submit(self, update: Any, text: str) -> None:
         if not text:

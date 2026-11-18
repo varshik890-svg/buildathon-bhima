@@ -302,7 +302,11 @@ def test_event_from_other_thread_reaches_loop():
 
 # ------------------------------------------------------------- commands ---
 
-def test_ask_submits_in_background():
+def test_ask_submits_in_background(monkeypatch):
+    def unexpected_chat(*args, **kwargs):
+        pytest.fail("/ask should submit through the workflow")
+
+    monkeypatch.setattr(tb.talker, "ask", unexpected_chat)
     bot, backend = make_bot()
     upd = update_from(OWNER)
 
@@ -316,6 +320,26 @@ def test_ask_submits_in_background():
     run(main())
     assert backend.calls == [("submit", "add a test")]
     assert "r1" in bot.app.bot.messages[0][1]
+
+
+@pytest.mark.parametrize(("answer", "reply"), [
+    ("Hi there", "Hi there"),
+    (None, "Talker offline. Use /ask to start a task."),
+])
+def test_plain_text_uses_talker(monkeypatch, answer, reply):
+    bot, backend = make_bot()
+    calls = []
+
+    def ask(text, system=None):
+        calls.append((text, system))
+        return answer
+
+    monkeypatch.setattr(tb.talker, "ask", ask)
+    update = update_from(OWNER, " hello ")
+    run(bot.on_text(update, SimpleNamespace()))
+    assert update.effective_message.replies == [reply]
+    assert len(calls) == 1 and calls[0][0] == "hello" and "/ask" in calls[0][1]
+    assert backend.calls == []
 
 
 def test_ask_without_text_shows_usage():
