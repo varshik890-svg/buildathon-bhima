@@ -77,8 +77,9 @@ def hidden_test_for(task_id: str, tasks_file: Path | None = None) -> Path | None
     tasks_file = Path(tasks_file or config.DEMO_TASKS)
     if not tasks_file.exists():
         return None
+    base_id = str(task_id).split("-")[0]  # "t1-3fa2c1" (a run of demo task t1) -> "t1"
     for t in json.loads(tasks_file.read_text(encoding="utf-8")).get("tasks", []):
-        if str(t.get("id")) == str(task_id) and t.get("hidden_test"):
+        if str(t.get("id")) == base_id and t.get("hidden_test"):
             p = tasks_file.parent / t["hidden_test"]
             return p if p.exists() else None
     return None

@@ -295,3 +295,42 @@ def test_demo_template_tests_pass_and_hidden_tests_fail(tmp_path):
         passed, _ = checks.verify_hidden(tid, ws)
         assert passed is False, tid
     assert not gitops.has_changes(ws)
+
+
+def test_cli_status_report_and_demo_plan(tmp_path, monkeypatch, capsys):
+    from bhima import cli, config, orchestrator
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "state.db")
+    monkeypatch.setattr(config, "WORKSPACES_DIR", tmp_path / "ws")
+    monkeypatch.setattr(config, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr(config, "LOGS_DIR", tmp_path / "logs")
+    monkeypatch.setattr(orchestrator, "_instance", None)
+    assert cli.main(["status"]) == 0
+    assert "No requests yet" in capsys.readouterr().out
+    assert cli.main(["report"]) == 0
+    plan = cli.demo_plan("t5")
+    assert plan.tasks[0].id.startswith("t5-") and plan.tasks[0].kind == "scrape"
+    assert checks.hidden_test_for(plan.tasks[0].id).name == "test_hidden_t5.py"
+
+
+def test_module_level_api_for_bot(tmp_path, monkeypatch):
+    from bhima import orchestrator
+    events = []
+    orch = Orchestrator(store=Store(tmp_path / "s.db"), workspace=tmp_path / "ws" / "demo", background=True,
+                        planner=lambda r, d, rid: make_plan(rid),
+                        router=lambda t, h: Route("claude", "sonnet", "low", False, 1, "rules", ""),
+                        context=lambda t, d, b, h: ContextPack(t.id, "", [], 0),
+                        worker_factory=lambda cli: FakeWorker(cli, {"claude": ["fix"]}, []), memory=FakeMemory())
+    monkeypatch.setattr(orchestrator, "_instance", orch)
+    orchestrator.on_event(events.append)
+    rid = orchestrator.submit("hi")
+    orch.wait(30)
+    ev = [e for e in events if e["kind"] == "plan_ready"][0]
+    assert len(ev["id"]) <= 55 and set(ev) >= {"kind", "id", "text"}
+    orchestrator.approve(ev["id"])
+    orch.wait(60)
+    m = [e for e in events if e["kind"] == "needs_approval"][0]
+    orchestrator.approve(m["id"])
+    orch.wait(30)
+    assert "merged" in kinds(events)
+    assert rid in orchestrator.status()
