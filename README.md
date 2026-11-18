@@ -193,19 +193,23 @@ You need Claude Code and Codex logged in. GLiDE is optional: `scripts/run_glide.
 
 Plain one-shot `claude -p` against Bhima on 7 seeded tasks, scored by hidden acceptance tests:
 
+Method (the same idea as [HarnessBench](https://github.com/reacher-z/HarnessBench)): **fix the base model, vary the harness.** The final run (17:48 IST):
+
 | | Plain `claude -p` | Bhima |
 |---|---|---|
 | Hidden acceptance tests passed | 7/7 | 7/7 |
-| Tokens, total | ~1.80M | **~1.68M (−7%)** |
-| Best per-task saving | — | −22% (t6), from ranked context |
+| Tokens, total | 1.88M | **1.63M (−13.6%)** |
+| Tasks where Bhima used fewer tokens | — | **5 of 7** |
+| Misleading-location task (t6) | 370k | **222k (−40%)** |
+| Wall time | 147 s | 164 s (+12%, from planning and checks) |
 
 **What this shows, honestly:** Claude Sonnet already solves tasks of this size in one shot, so Bhima's value here **isn't a higher pass rate**. It's:
 - **proof instead of trust:** hidden tests on the exact SHA, plus human approval
 - **visibility:** the route, the context and the assumptions for every task
 - **cheaper planning and chat:** a local model on the laptop's GPU, at zero subscription cost
-- **fewer tokens overall**
+- **fewer tokens overall,** most of all where ranked context matters (−40% on t6)
 
-Harder, multi-step tasks are the next benchmark.
+**Next benchmarks:** Python exercises from the public [Aider polyglot benchmark](https://github.com/Aider-AI/polyglot-benchmark), and a Bhima adapter for [Harbor / Terminal-Bench 2.0](https://github.com/harbor-framework/harbor), which already includes Claude Code and Codex as agents.
 
 ### Honest limits (today)
 
