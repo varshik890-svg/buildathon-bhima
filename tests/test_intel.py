@@ -247,3 +247,20 @@ def test_planner_parses_json_from_result_text(proj):
     d = planner._extract_json('Here:\n```json\n{"summary": "s", "tasks": [{"title": "x"}]}\n```')
     plan = planner._to_plan(d, "req", proj, "r9")
     assert plan.tasks[0].title == "x" and plan.tasks[0].kind == "code"
+
+
+def test_planner_disables_tools_and_reads_request_from_stdin(proj, monkeypatch):
+    from types import SimpleNamespace
+
+    request = "a multiline request\nwith more details"
+    monkeypatch.setattr(planner, "_claude_exe", lambda: "fake-claude")
+
+    def run(cmd, **kwargs):
+        assert request not in " ".join(cmd)
+        assert request in kwargs["input"]
+        assert cmd[cmd.index("--tools") + 1] == ""
+        assert cmd[cmd.index("--disallowedTools") + 1] == "*"
+        return SimpleNamespace(stdout='{"structured_output": {"tasks": [{"title": "fake plan"}]}}')
+
+    monkeypatch.setattr(planner.subprocess, "run", run)
+    assert planner.make_plan(request, proj).tasks[0].title == "fake plan"

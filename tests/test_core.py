@@ -52,6 +52,8 @@ class FakeWorker:
             fix_boundary(Path(workdir))
         elif action == "break":
             break_tests(Path(workdir))
+        elif action == "unrelated":
+            (workdir / "unrelated.txt").write_text("visible tests still pass")
         usage = {"input_tokens": 100, "output_tokens": 50}
         return RunResult(task.id, round, self.name, True, REPORT_OK, checks.parse_assumptions(REPORT_OK),
                          usage, 1.5, "", None)
@@ -107,6 +109,7 @@ def test_happy_path_plan_run_merge_memory(make_orch):
 
     orch.approve(plan_ev["id"])
     assert len(calls) == 1
+    assert orch.store.get_request(rid)["status"] == "awaiting_merge"
     merge_ev = [e for e in events if e["kind"] == "needs_approval"][0]
     assert "quantity is always an int" in merge_ev["text"]
     sha = merge_ev["sha"]
@@ -121,6 +124,7 @@ def test_happy_path_plan_run_merge_memory(make_orch):
     parents = gitops.git(ws, "rev-list", "--parents", "-n", "1", "HEAD").stdout.split()
     assert sha in parents  # --no-ff merge of the exact approved SHA
     assert orch.store.get_task("t1")["status"] == "merged"
+    assert orch.store.get_request(rid)["status"] == "done"
 
     mem_ev = [e for e in events if e["kind"] == "memory_proposal"][0]
     orch.approve(mem_ev["id"])
@@ -138,6 +142,28 @@ def test_retry_feeds_failure_back_then_passes(make_orch):
     runs = orch.store.runs_for_task("t1")
     assert [r["data"]["passed"] for r in runs] == [False, True]
     assert orch.store.get_task("t1")["status"] == "awaiting_merge"
+
+
+def test_hidden_acceptance_checks_clean_candidate_before_merge(make_orch, monkeypatch):
+    orch, calls, events, _ = make_orch({"claude": ["unrelated", "fix"]})
+    actual_verify = checks.verify_hidden
+    candidates = []
+
+    def verify(task_id, checkout, hidden):
+        assert checkout != orch.workspace
+        assert gitops.head_sha(checkout) == gitops.head_sha(orch.workspace)
+        assert not gitops.has_changes(checkout)
+        assert not any((orch.workspace / "tests").glob("test_hidden_*.py"))
+        assert not any(e.get("sha") for e in events if e["kind"] == "needs_approval")
+        candidates.append(checkout)
+        return actual_verify(task_id, checkout, hidden)
+
+    monkeypatch.setattr(checks, "verify_hidden", verify)
+    orch.submit("x")
+    orch.approve("p1")
+    assert len(candidates) == 2 and not any(p.exists() for p in candidates)
+    assert "hidden acceptance test failed" in calls[1]["feedback"]
+    assert orch.store.find_approval("t1")["kind"] == "merge"
 
 
 def test_switches_cli_after_retries_exhausted(make_orch):
@@ -174,6 +200,50 @@ def test_no_change_counts_as_failure(make_orch):
     assert orch.store.get_task("t1")["status"] == "awaiting_merge"
 
 
+def test_router_history_uses_round_outcomes_and_model(make_orch):
+    from bhima import router
+
+    orch, _, _, _ = make_orch({"claude": ["unrelated", None, "fix"]})
+    observed = []
+
+    def route(task, history):
+        observed.append(router.summarize_history(task, history))
+        return Route("claude", "haiku", "low", False, 1, "rules", "fake")
+
+    orch.route_fn = route
+    orch.submit("x")
+    orch.approve("p1")
+    assert observed[2]["prior_failures"] == 2
+    assert observed[2]["past_results"] == {"claude_haiku": {"tries": 2, "ok": 0}}
+    assert orch.store.runs_for_task("t1")[1]["data"]["visible_tests_passed"]
+    assert [(r.model, r.ok) for r in orch._history("t1")] == [
+        ("haiku", False), ("haiku", False), ("haiku", True),
+    ]
+
+
+def test_saved_plan_command_is_never_executed(make_orch, monkeypatch):
+    import sys
+
+    orch, _, _, _ = make_orch({"claude": ["fix"]})
+    rid = orch.submit("x")
+    data = orch.store.get_plan("p1")["data"]
+    data["test_command"] = "untrusted-command"
+    orch.store.save_plan("p1", rid, data)
+    actual_run = subprocess.run
+    commands = []
+
+    def run(cmd, **kwargs):
+        if cmd[0] != "git":
+            assert not kwargs.get("shell")
+            commands.append(cmd)
+        return actual_run(cmd, **kwargs)
+
+    monkeypatch.setattr(checks.subprocess, "run", run)
+    orch.approve("p1")
+    assert commands[0] == [sys.executable, "-m", "pytest", "-q"]
+    assert orch.store.find_approval("t1")["kind"] == "merge"
+
+
 def test_deny_plan_and_merge(make_orch):
     orch, calls, events, _ = make_orch({"claude": ["fix"]}, plan=make_plan(n=2))
     rid = orch.submit("x")
@@ -189,7 +259,32 @@ def test_deny_plan_and_merge(make_orch):
     merge_ev = [e for e in events2 if e["kind"] == "needs_approval"][0]
     orch2.deny(merge_ev["id"])
     assert "quantity > BULK" in (orch2.workspace / "invoice" / "pricing.py").read_text()
-    assert orch2.store.get_task("t1")["status"] == "rejected"
+    assert orch2.store.get_task("t1")["status"] == "denied"
+    assert orch2.store.get_request(rid2)["status"] == "done"
+
+
+def test_merge_conflict_can_be_retried_on_current_main(make_orch):
+    orch, calls, events, _ = make_orch({"claude": ["fix"]})
+    rid = orch.submit("x")
+    orch.approve("p1")
+    approval = orch.store.find_approval("t1")
+    pricing = orch.workspace / "invoice" / "pricing.py"
+    pricing.write_text(pricing.read_text().replace("quantity > BULK_THRESHOLD", "quantity > BULK_THRESHOLD "))
+    gitops.commit_all(orch.workspace, "independent main edit")
+
+    assert orch.approve(approval["id"]).startswith("Merge failed:")
+    assert orch.store.get_task("t1")["status"] == "merge_conflict"
+    assert orch.store.get_request(rid)["status"] == "awaiting_retry"
+    assert "already decided" in orch.deny(approval["id"])
+    retry = orch.store.find_approval("t1")
+    assert retry["kind"] == "retry"
+    orch.approve(retry["id"])
+    assert "current main" in calls[-1]["feedback"]
+    assert orch.store.get_request(rid)["status"] == "awaiting_merge"
+    second = orch.store.find_approval("t1")
+    assert second["kind"] == "merge" and second["detail"] != approval["detail"]
+    assert orch.approve(second["id"]).startswith("Merged task")
+    assert orch.store.get_request(rid)["status"] == "done"
 
 
 def test_merge_conflict_aborts(tmp_path):
@@ -214,10 +309,30 @@ def test_workspace_is_own_repo_and_ignores_state(tmp_path):
     gitops.start_task_branch(ws, "z")
     (ws / ".bhima").mkdir()
     (ws / ".bhima" / "junk.txt").write_text("x")
+    (ws / ".env").write_text("DEMO=fake")
+    for name in (".venv", "__pycache__", "node_modules", "build", "dist"):
+        (ws / name).mkdir()
+        (ws / name / "generated").touch()
     assert gitops.commit_all(ws, "nothing") is None
     (ws / "new.py").write_text("x = 1\n")
     sha = gitops.commit_all(ws, "new")
     assert gitops.changed_files(ws, sha) == ["new.py"]
+
+
+@pytest.mark.parametrize("platform", ["win32", "linux"])
+def test_default_workspace_uses_platform_data_dir(tmp_path, monkeypatch, platform):
+    from types import SimpleNamespace
+
+    from bhima import config
+
+    monkeypatch.setattr(config, "sys", SimpleNamespace(platform=platform))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localappdata"))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    data_dir = tmp_path / ("localappdata" if platform == "win32" else "home/.local/share")
+    monkeypatch.setattr(config, "WORKSPACES_DIR", config._workspaces_dir())
+    expected = data_dir / "bhima" / "workspaces" / "demo"
+    assert gitops.workspace_path() == expected
+    assert gitops.create_workspace() == expected
 
 
 def test_parse_assumptions_variants():
@@ -241,6 +356,34 @@ def test_claude_output_parsing():
     assert cmd[cmd.index("--allowedTools") + 1] == "Read,Edit,Write,Glob,Grep,Bash(python -m pytest*)"
 
 
+def test_claude_retries_and_records_unsupported_effort(tmp_path, monkeypatch):
+    commands = []
+    raw = {}
+
+    def run(cmd, cwd, stdin_text):
+        commands.append(cmd.copy())
+        if "--effort" in cmd:
+            return 1, "", "error: unknown option '--effort'", 0.1, False
+        if "--max-turns" in cmd:
+            return 1, "", "error: unknown option '--max-turns'", 0.1, False
+        return 0, json.dumps({"result": REPORT_OK}), "", 0.1, False
+
+    def save_raw(cli, task_id, rnd, payload):
+        raw.update(payload)
+        return "fake-run.json"
+
+    monkeypatch.setattr(wclaude, "run_cli", run)
+    monkeypatch.setattr(wclaude, "save_raw", save_raw)
+    task = make_plan().tasks[0]
+    pack = ContextPack(task.id, "", [], 0)
+    route = Route("claude", "sonnet", "medium", False, 1, "rules", "")
+    result = wclaude.ClaudeWorker(exe="fake-claude").run(task, pack, route, tmp_path, 0)
+    assert result.ok and result.duration_s == 0.3
+    assert len(commands) == 3 and "--effort" not in commands[1] and "--max-turns" in commands[1]
+    assert "--effort" not in commands[2] and "--max-turns" not in commands[2]
+    assert raw["unsupported_options"] == ["--effort", "--max-turns"]
+
+
 def test_codex_jsonl_parsing():
     lines = [{"type": "thread.started"},
              {"type": "item.completed", "item": {"type": "agent_message", "text": "first"}},
@@ -261,6 +404,40 @@ def test_codex_missing_returns_error(monkeypatch, tmp_path):
     r = wcodex.CodexWorker().run(t, ContextPack("t9", "", [], 0), Route("codex", "m", "low", False, 1, "rules", ""),
                                  tmp_path, 0)
     assert r.ok is False and r.error == "codex not installed"
+
+
+def test_planner_and_worker_get_clean_child_environment(tmp_path, monkeypatch):
+    import os
+    from types import SimpleNamespace
+
+    from bhima import config, planner
+
+    monkeypatch.setattr(config, "_env_values", None)
+    monkeypatch.setenv("BHIMA_CHILD_KEEP", "preserved")
+    secret_names = ("GH_TOKEN", "GITHUB_TOKEN", "test_api_key", "SSH_SECRET_FILE", "DB_PASSWORD")
+    for name in secret_names:
+        monkeypatch.setenv(name, "fake")
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("BHIMA_FILE_ONLY=private-config")
+    config.load_env(dotenv)
+    assert config.get("BHIMA_FILE_ONLY") == "private-config"
+    assert "BHIMA_FILE_ONLY" not in os.environ
+    calls = []
+
+    def run(cmd, **kwargs):
+        env = kwargs["env"]
+        assert not set(secret_names) & env.keys()
+        assert "BHIMA_FILE_ONLY" not in env
+        assert env["BHIMA_CHILD_KEEP"] == "preserved"
+        calls.append(cmd[0])
+        return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(planner, "_claude_exe", lambda: "fake-planner")
+    wbase.run_cli(["fake-worker"], tmp_path)
+    planner.make_plan("question", tmp_path)
+    assert calls == ["fake-worker", "fake-planner"]
+    assert all(os.environ[name] == "fake" for name in secret_names)
 
 
 def test_prompt_has_report_format_and_feedback():
@@ -311,6 +488,35 @@ def test_cli_status_report_and_demo_plan(tmp_path, monkeypatch, capsys):
     plan = cli.demo_plan("t5")
     assert plan.tasks[0].id.startswith("t5-") and plan.tasks[0].kind == "scrape"
     assert checks.hidden_test_for(plan.tasks[0].id).name == "test_hidden_t5.py"
+
+
+def test_cli_commands_finish_in_foreground(make_orch, monkeypatch):
+    from bhima import cli, config, orchestrator
+
+    orch, calls, _, _ = make_orch({"claude": ["fix"]})
+    backgrounds = []
+
+    def configure(*, background):
+        backgrounds.append(background)
+        orch.background = background
+        return orch
+
+    monkeypatch.setattr(config, "ensure_dirs", lambda: None)
+    monkeypatch.setattr(config, "_env_values", None)
+    monkeypatch.setattr(orchestrator, "configure", configure)
+    assert cli.main(["ask", "fix it"]) == 0
+    plan = orch.store.find_approval("p1")
+    assert plan["kind"] == "plan"
+    assert cli.main(["approve", plan["id"]]) == 0
+    merge = orch.store.find_approval("t1")
+    assert calls and merge["kind"] == "merge"
+    assert cli.main(["deny", merge["id"]]) == 0
+    assert orch.store.get_task("t1")["status"] == "denied"
+    assert cli.main(["demo", "t1", "--yes"]) == 0
+    assert any(a["kind"] == "merge" and a["target_id"].startswith("t1-")
+               for a in orch.store.pending_approvals())
+    assert backgrounds == [False] * 4
+    assert not orch._threads
 
 
 def test_module_level_api_for_bot(tmp_path, monkeypatch):

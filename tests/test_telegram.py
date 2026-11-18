@@ -64,9 +64,11 @@ class FakeBackend:
         if self.fail:
             raise RuntimeError("boom")
         self.calls.append(("approve", target))
+        return f"Approval {target} already decided."
 
     def deny(self, target):
         self.calls.append(("deny", target))
+        return f"Denied merge {target}."
 
     def status(self):
         return "idle"
@@ -95,8 +97,9 @@ def make_bot():
     return bot, backend
 
 
-def update_from(chat_id, text="", query=None):
-    return SimpleNamespace(effective_chat=SimpleNamespace(id=chat_id),
+def update_from(chat_id, text="", query=None, *, user_id=OWNER, chat_type="private"):
+    return SimpleNamespace(effective_chat=SimpleNamespace(id=chat_id, type=chat_type),
+                           effective_user=SimpleNamespace(id=user_id),
                            effective_message=FakeMessage(text), callback_query=query)
 
 
@@ -136,6 +139,23 @@ def test_stranger_button_is_rejected():
     run(bot.on_button(update_from(999, query=q), SimpleNamespace()))
     assert backend.calls == []
     assert q.edited is None
+
+
+def test_group_requires_configured_owner_for_commands_and_buttons():
+    group = -100123
+    backend = FakeBackend()
+    bot = tb.BhimaBot("TOKEN", group, backend, owner_id=OWNER)
+    q = FakeQuery("approve:t1")
+    outsider = update_from(group, query=q, user_id=999, chat_type="supergroup")
+    run(bot.cmd_status(outsider, SimpleNamespace(args=[])))
+    run(bot.on_button(outsider, SimpleNamespace()))
+    assert outsider.effective_message.replies == []
+    assert not backend.calls and q.edited is None
+    owner = update_from(group, query=q, chat_type="supergroup")
+    run(bot.on_button(owner, SimpleNamespace()))
+    assert backend.calls == [("approve", "t1")]
+    assert not tb.BhimaBot("TOKEN", group, backend)._allowed(owner)
+    assert not bot._allowed(update_from(group, user_id=None, chat_type="supergroup"))
 
 
 # ------------------------------------------------------------ splitting ---
@@ -182,7 +202,7 @@ def test_button_approve_calls_orchestrator():
     q = FakeQuery("approve:t1")
     run(bot.on_button(update_from(OWNER, query=q), SimpleNamespace()))
     assert backend.calls == [("approve", "t1")]
-    assert q.edited.endswith("-> Approved")
+    assert q.edited.endswith("-> Approval t1 already decided.")
 
 
 def test_button_deny_calls_orchestrator():
@@ -190,7 +210,16 @@ def test_button_deny_calls_orchestrator():
     q = FakeQuery("deny:t9")
     run(bot.on_button(update_from(OWNER, query=q), SimpleNamespace()))
     assert backend.calls == [("deny", "t9")]
-    assert q.edited.endswith("-> Denied")
+    assert q.edited.endswith("-> Denied merge t9.")
+
+
+def test_button_edit_preserves_backend_failure_for_long_message():
+    bot, backend = make_bot()
+    backend.approve = lambda target: "Merge failed: conflict"
+    q = FakeQuery("approve:t1", text="x" * tb.MAX_MESSAGE)
+    run(bot.on_button(update_from(OWNER, query=q), SimpleNamespace()))
+    assert q.edited.endswith("-> Merge failed: conflict")
+    assert len(q.edited) == tb.MAX_MESSAGE
 
 
 def test_button_failure_is_reported_not_raised():
@@ -332,8 +361,8 @@ def test_backend_error_is_reported():
 def test_load_settings_reads_env(monkeypatch):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "abc")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
-    token, chat = tb.load_settings()
-    assert token and chat  # values come from config, env or .env; never printed
+    monkeypatch.setenv("TELEGRAM_OWNER_ID", "111")
+    assert tb.load_settings() == ("abc", "42", "111")
 
 
 def test_build_app_registers_owner_filtered_handlers():
