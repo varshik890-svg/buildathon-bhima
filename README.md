@@ -173,9 +173,39 @@ copy .env.example .env      # fill TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TELEGRA
 
 You need Claude Code and Codex logged in. GLiDE is optional: `scripts/run_glide.sh` serves GLiDE-0.4B locally, and without it the rule router is used.
 
+### Interfaces
+
+- **`python -m bhima tui`** is a chat-style terminal app (Textual). Plain text chats with the local Talker, and `/ask <task>` runs the workflow. A live sidebar shows the plan ("planned by"), the route with GLiDE probability bars, the context files, the checks and the totals. ctrl+a and ctrl+d approve or deny.
+- **`python -m bhima dash`** is a lightweight live dashboard, using only the standard library.
+- **Telegram** (`python -m bhima bot`) lets you control it from the phone: `/ask`, Approve and Deny buttons, `/report`.
+
 ### Demo
 
-_Baseline results and the demo script are added after the live run._
+1. `python -m bhima tui`, then type `hi, what can you do?`. The local Talker answers in under a second.
+2. `/ask Fix cent discrepancies in discounted invoice totals` (seeded task **t6**: the symptom is in `invoice.py`, the root cause is in the GST rounding module).
+3. The plan appears with `planned by: talker-local`. Press ctrl+a.
+4. The sidebar shows the **route** (GLiDE's probabilities, then the chosen CLI, model and effort), the **context pack** ("why these files"), and the round.
+5. The checks run the visible tests **and the hidden acceptance tests on a clean checkout of the candidate SHA**, and the agent's **Assumptions** list is shown.
+6. The merge approval shows the diff, the SHA and the assumptions. Press ctrl+a to merge (it never pushes).
+7. `/report` shows rounds, tokens and time.
+
+### Results (measured live, `demo/results/baseline.md`)
+
+Plain one-shot `claude -p` against Bhima on 7 seeded tasks, scored by hidden acceptance tests:
+
+| | Plain `claude -p` | Bhima |
+|---|---|---|
+| Hidden acceptance tests passed | 7/7 | 7/7 |
+| Tokens, total | ~1.80M | **~1.68M (−7%)** |
+| Best per-task saving | — | −22% (t6), from ranked context |
+
+**What this shows, honestly:** Claude Sonnet already solves tasks of this size in one shot, so Bhima's value here **isn't a higher pass rate**. It's:
+- **proof instead of trust:** hidden tests on the exact SHA, plus human approval
+- **visibility:** the route, the context and the assumptions for every task
+- **cheaper planning and chat:** a local model on the laptop's GPU, at zero subscription cost
+- **fewer tokens overall**
+
+Harder, multi-step tasks are the next benchmark.
 
 ### Honest limits (today)
 
