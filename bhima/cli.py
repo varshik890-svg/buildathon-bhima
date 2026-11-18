@@ -26,9 +26,9 @@ def _print_event(ev: dict) -> None:
     print(f"[{ev['kind']}] {ev['text']}", flush=True)
 
 
-def _orch(background: bool = False):
+def _orch():
     from . import orchestrator
-    orch = orchestrator.configure(background=background)
+    orch = orchestrator.configure(background=False)
     orch.on_event(_print_event)
     return orch
 
@@ -44,7 +44,7 @@ def demo_plan(task_id: str) -> Plan:
             rid = new_id("r")
             task = task_from_dict({**t, "id": f"{t['id']}-{rid[1:]}", "request_id": rid})
             return Plan(id=new_id("p"), request_id=rid, tasks=[task],
-                        test_command=data.get("test_command", config.DEFAULT_TEST_COMMAND),
+                        test_command=config.DEFAULT_TEST_COMMAND,
                         summary=f"demo {t['id']}: {t['title']}")
     raise SystemExit(f"unknown demo task {task_id}; have {[t['id'] for t in data['tasks']]}")
 
@@ -121,28 +121,26 @@ def run_plain(task: Task, ws: Path, model: str, effort: str) -> dict:
             "error": "timeout" if timed_out else (None if code == 0 else err[-300:])}
 
 
-def run_harness(task: Task, test_command: str) -> dict:
+def run_harness(task: Task) -> dict:
     from .orchestrator import Orchestrator
     store = Store(config.STATE_DIR / "baseline.db")
-    orch = Orchestrator(store=store, workspace=config.WORKSPACES_DIR / f"baseline-bhima-{task.id}",
+    orch = Orchestrator(store=store, workspace=gitops.workspace_path(f"baseline-bhima-{task.id}"),
                         background=False)
     orch.on_event(_print_event)
     ws = orch.ensure_workspace(reset=True)
     task.id = f"{task.id}-{new_id('')}"  # fresh history per baseline run; hidden test matched by prefix
     task.request_id = store.add_request(f"baseline {task.id}: {task.title}")
     start = time.time()
-    res = orch.run_task(task, test_command)
+    res = orch.run_task(task)
     secs = time.time() - start
     runs = store.runs_for_task(task.id)
-    verified = None
-    if res.get("sha"):
-        gitops.git(ws, "checkout", "-q", res["sha"])
-        verified, _ = checks.verify_hidden(task.id, ws)
-        gitops.git(ws, "checkout", "-q", gitops.MAIN)
-    else:
-        verified = False
+    sha = res.get("sha")
+    candidate = next((r["data"] for r in reversed(runs) if r["data"].get("sha") == sha), {}) if sha else {}
+    verified = candidate.get("hidden_tests_passed")
+    if verified is None:
+        verified = checks.verify_hidden_commit(task.id, ws, sha)[0] if sha else False
     return {"rounds": len(runs), "tokens": sum(report.tokens_of(r["data"].get("usage", {})) for r in runs),
-            "secs": secs, "tests": res.get("passed"), "verified": verified,
+            "secs": secs, "tests": candidate.get("visible_tests_passed", False), "verified": verified,
             "cost": sum(float(r["data"].get("usage", {}).get("total_cost_usd", 0) or 0) for r in runs),
             "route": "->".join(dict.fromkeys(f"{r['cli']}:{r['model']}/{r['effort']}" for r in runs))}
 
@@ -163,7 +161,7 @@ def cmd_baseline(args) -> int:
             entry["plain"] = run_plain(task_from_dict(t), ws, args.model, args.effort)
             print(f"[plain] verified={entry['plain'].get('verified')}", flush=True)
         if not args.plain_only:
-            entry["harness"] = run_harness(task_from_dict(t), data.get("test_command", config.DEFAULT_TEST_COMMAND))
+            entry["harness"] = run_harness(task_from_dict(t))
             print(f"[bhima] verified={entry['harness'].get('verified')}", flush=True)
         results.append(entry)
         (config.STATE_DIR / "baseline.json").write_text(json.dumps(results, indent=2, default=str),

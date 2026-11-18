@@ -55,6 +55,7 @@ class RunResult:
     duration_s: float
     raw_path: str
     error: str | None = None
+    model: str = ""
 
 
 @dataclass

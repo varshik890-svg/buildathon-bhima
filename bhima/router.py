@@ -66,8 +66,7 @@ def summarize_history(task, history: list) -> dict:
     mine = [r for r in history if r.task_id == task.id]
     per_route: dict[str, dict] = defaultdict(lambda: {"tries": 0, "ok": 0})
     for r in history:
-        model = (r.usage or {}).get("model", "") if isinstance(r.usage, dict) else ""
-        key = "codex" if r.cli == "codex" else _route_key("claude", model or "sonnet")
+        key = _route_key(r.cli, r.model or "sonnet")
         per_route[key]["tries"] += 1
         per_route[key]["ok"] += int(bool(r.ok))
     failures = [r for r in mine if not r.ok]

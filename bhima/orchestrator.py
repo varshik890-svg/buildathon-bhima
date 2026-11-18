@@ -197,6 +197,7 @@ class Orchestrator:
         self._save_plan(rid, plan)
 
     def _save_plan(self, rid: str, plan: Plan) -> None:
+        plan.test_command = config.DEFAULT_TEST_COMMAND
         self.store.save_plan(plan.id, rid, to_dict(plan), status="pending")
         for t in plan.tasks:
             t.request_id = rid
@@ -225,16 +226,18 @@ class Orchestrator:
     def approve(self, target_id: str) -> str:
         appr = self._resolve_approval(target_id)
         if not appr:
-            return f"Nothing pending for {target_id}."
-        self.store.decide_approval(appr["id"], "approved")
+            return self._approval_unavailable(target_id)
+        if not self.store.decide_approval(appr["id"], "approved"):
+            return f"Approval {appr['id']} already decided."
         kind = appr["kind"]
         if kind == "plan":
             self.store.set_plan_status(appr["target_id"], "approved")
             self._spawn(self._run_plan, appr["target_id"])
-            return f"Plan {appr['target_id']} approved; running tasks."
+            return f"Plan {appr['target_id']} approved."
         if kind == "merge":
-            self._spawn(self._merge, appr["target_id"], appr["detail"])
-            return f"Merging {appr['detail'][:10]} for task {appr['target_id']}."
+            # Telegram invokes approve on a worker thread, so this result can
+            # include the actual merge outcome without blocking its event loop.
+            return self._merge(appr["target_id"], appr["detail"])
         if kind == "memory":
             entries = json.loads(appr["detail"] or "[]")
             try:
@@ -245,15 +248,16 @@ class Orchestrator:
             self.emit("info", appr["id"], msg)
             return msg
         if kind == "retry":
-            self._spawn(self._run_task_by_id, appr["target_id"], True)
-            return f"Retrying task {appr['target_id']}."
+            self._spawn(self._run_task_by_id, appr["target_id"], appr["detail"])
+            return f"Retry approved for task {appr['target_id']}."
         return f"Approved {appr['id']}."
 
     def deny(self, target_id: str) -> str:
         appr = self._resolve_approval(target_id)
         if not appr:
-            return f"Nothing pending for {target_id}."
-        self.store.decide_approval(appr["id"], "denied")
+            return self._approval_unavailable(target_id)
+        if not self.store.decide_approval(appr["id"], "denied"):
+            return f"Approval {appr['id']} already decided."
         kind, tid = appr["kind"], appr["target_id"]
         if kind == "plan":
             self.store.set_plan_status(tid, "denied")
@@ -263,10 +267,35 @@ class Orchestrator:
                 for t in self.store.tasks_for_request(plan["request_id"]):
                     self.store.update_task(t["id"], status="cancelled")
         elif kind in ("merge", "retry"):
-            self.store.update_task(tid, status="rejected")
+            self.store.update_task(tid, status="denied")
+            self._refresh_request(self.store.get_task(tid)["request_id"])
         msg = f"Denied {kind} {tid}."
         self.emit("info", appr["id"], msg)
         return msg
+
+    def _approval_unavailable(self, target_id: str) -> str:
+        aid = str(target_id).strip()
+        if self.store.get_approval(aid):
+            return f"Approval {aid} already decided."
+        return f"Nothing pending for {target_id}."
+
+    def _refresh_request(self, request_id: str) -> None:
+        with self._lock:
+            statuses = {t["status"] for t in self.store.tasks_for_request(request_id)}
+            if not statuses:
+                return
+            terminal = {"merged", "denied", "rejected"}
+            if statuses <= terminal:
+                status = "done"
+            elif statuses <= terminal | {"done"}:
+                status = "answered"
+            elif statuses & {"planned", "running"}:
+                status = "running"
+            elif statuses & {"merge_conflict", "merge_failed", "failed"}:
+                status = "awaiting_retry"
+            else:
+                status = "awaiting_merge"
+            self.store.set_request_status(request_id, status)
 
     # ------------------------------------------------------------ runs --
     def _run_plan(self, plan_id: str) -> None:
@@ -275,20 +304,25 @@ class Orchestrator:
         self.ensure_workspace()
         self.store.set_request_status(plan.request_id, "running")
         for task in plan.tasks:
-            self.run_task(task, plan.test_command)
-        self.store.set_request_status(plan.request_id, "done")
+            self.run_task(task)
+        self._refresh_request(plan.request_id)
 
-    def _run_task_by_id(self, task_id: str, extra: bool = False) -> None:
+    def _run_task_by_id(self, task_id: str, detail: str) -> None:
         row = self.store.get_task(task_id)
-        plan = self.store.get_plan(row["plan_id"])
-        test_cmd = plan["data"].get("test_command") if plan else config.DEFAULT_TEST_COMMAND
         self.ensure_workspace()
-        self.run_task(task_from_dict(row["data"]), test_cmd, extra_round=extra)
+        restart = row["status"] in {"merge_conflict", "merge_failed"}
+        self.store.set_request_status(row["request_id"], "running")
+        self.run_task(task_from_dict(row["data"]), extra_round=True, merge_feedback=detail if restart else "")
+        self._refresh_request(row["request_id"])
 
     def _history(self, task_id: str) -> list[RunResult]:
         keys = set(RunResult.__dataclass_fields__)
-        return [RunResult(**{k: v for k, v in r["data"].items() if k in keys})
-                for r in self.store.runs_for_task(task_id)]
+        history = []
+        for row in self.store.runs_for_task(task_id):
+            data = {k: v for k, v in row["data"].items() if k in keys}
+            data.update(ok=bool(row["data"].get("passed", row["ok"])), model=row["model"])
+            history.append(RunResult(**data))
+        return history
 
     def _route_for_round(self, task: Task, history: list[RunResult], first_cli: str | None,
                          switch: bool) -> Route:
@@ -309,19 +343,24 @@ class Orchestrator:
         return Route(cli=want, model=model, effort=route.effort, needs_plan=route.needs_plan,
                      confidence=route.confidence, source=route.source, reason=f"{route.reason} | {why}")
 
-    def run_task(self, task: Task, test_command: str, extra_round: bool = False) -> dict:
+    def run_task(self, task: Task, extra_round: bool = False, merge_feedback: str = "") -> dict:
         """Run one task through route -> pack -> worker -> commit -> checks with retries."""
         with self._lock:
-            return self._run_task_locked(task, test_command, extra_round)
+            return self._run_task_locked(task, extra_round, merge_feedback)
 
-    def _run_task_locked(self, task: Task, test_command: str, extra_round: bool) -> dict:
+    def _run_task_locked(self, task: Task, extra_round: bool, merge_feedback: str) -> dict:
         ws = self.workspace
+        test_command = config.DEFAULT_TEST_COMMAND
         history = self._history(task.id)
         start_round = len(history)
         self.store.update_task(task.id, status="running")
         if gitops.has_changes(ws):
             gitops.discard_changes(ws)
-        branch = gitops.start_task_branch(ws, task.id)
+        task_row = self.store.get_task(task.id)
+        branch = task_row["branch"] if task_row else None
+        if merge_feedback:
+            branch = gitops.branch_name(f"{task.id}-retry-{start_round}")
+        branch = gitops.start_task_branch(ws, task.id, branch=branch)
         self.store.update_task(task.id, branch=branch)
         self.emit("task_started", task.id, f"Task {task.id}: {task.title} (branch {branch})", ref=task.request_id)
 
@@ -334,7 +373,10 @@ class Orchestrator:
         if history and extra_round:
             last_checks = self.store.checks_for_task(task.id)
             feedback = last_checks[-1]["data"].get("output", "")[-2000:] if last_checks else ""
+        if merge_feedback:
+            feedback = f"The previous candidate could not be merged. Reapply the task on current main.\n{merge_feedback}"
         sha, last_run, last_check = None, None, None
+        passed = False
         skipped_switch = False
         for i, step in enumerate(schedule):
             rnd = start_round + i
@@ -348,6 +390,7 @@ class Orchestrator:
             if hasattr(worker, "test_command"):
                 worker.test_command = test_command
             run = worker.run(task, pack, route, ws, rnd, feedback=feedback)
+            run.model = route.model
             if step == "switch" and not run.ok and run.error and "not installed" in run.error:
                 skipped_switch = True
                 self.store.add_run(task.id, rnd, route.cli, route.model, route.effort, False, to_dict(run))
@@ -357,19 +400,30 @@ class Orchestrator:
             new_sha = gitops.commit_all(ws, f"bhima {task.id} round {rnd} ({route.cli} {route.model}/{route.effort})"
                                             f": {task.title}")
             sha = new_sha or sha
-            if task.kind == "question":
+            if task.kind == "question" and not new_sha:
                 check = checks.CheckResult(task.id, True, "(question: no tests run)", run.assumptions)
             else:
                 check = checks.run_checks(task, ws, test_command, run.report)
+            visible_passed, hidden_passed = check.tests_passed, None
+            if run.ok and visible_passed and new_sha:
+                hidden_passed, _ = checks.verify_hidden_commit(task.id, ws, new_sha)
+                if hidden_passed is False:
+                    check.tests_passed = False
+                    check.output += "\nSeeded hidden acceptance test failed for the candidate commit."
             if not check.assumptions:
                 check.assumptions = list(run.assumptions)
-            changed = bool(sha) or task.kind == "question"
+            changed = bool(new_sha) or task.kind == "question"
             passed = run.ok and check.tests_passed and changed
+            cli_ok = run.ok
+            run.ok = passed
+            if not changed and not run.error:
+                run.error = "No file changes."
             run_data = to_dict(run)
-            run_data.update({"model": route.model, "effort": route.effort, "route_source": route.source,
+            run_data.update({"cli_ok": cli_ok, "effort": route.effort, "route_source": route.source,
                              "route_reason": route.reason, "pack_tokens": pack.tokens_est, "sha": new_sha,
-                             "tests_passed": check.tests_passed, "passed": passed})
-            self.store.add_run(task.id, rnd, route.cli, route.model, route.effort, run.ok, run_data)
+                             "tests_passed": check.tests_passed, "visible_tests_passed": visible_passed,
+                             "hidden_tests_passed": hidden_passed, "passed": passed})
+            self.store.add_run(task.id, rnd, route.cli, route.model, route.effort, passed, run_data)
             self.store.add_check(task.id, rnd, check.tests_passed, to_dict(check))
             history.append(run)
             last_run, last_check = run, check
@@ -383,11 +437,9 @@ class Orchestrator:
             if not changed:
                 reasons.append("You made no file changes. The task requires code changes.")
             feedback = checks.failure_feedback(check, run.error) + ("\n" + "\n".join(reasons) if reasons else "")
-        else:
-            passed = False
-
         rounds = len(history) - start_round
         if last_run is not None and passed:
+            sha = new_sha
             if task.kind == "question" and not sha:
                 self.store.update_task(task.id, status="done")
                 self.emit("task_done", task.id, f"Answer:\n{last_run.report}", ref=task.request_id)
@@ -400,7 +452,7 @@ class Orchestrator:
             self.emit("task_done", task.id, f"Task {task.id} passed checks in {rounds} round(s).",
                       ref=task.request_id)
             self.emit("needs_approval", aid,
-                      f"Merge task {task.id} ({task.title})\ncommit {sha[:10]} on {gitops.branch_name(task.id)}\n"
+                      f"Merge task {task.id} ({task.title})\ncommit {sha[:10]} on {branch}\n"
                       f"{stat}\nAssumptions to check:\n{assumptions}\nApprove with: approve {aid}",
                       ref=task.request_id, task_id=task.id, sha=sha)
             gitops.git(ws, "checkout", "-q", gitops.MAIN)
@@ -408,8 +460,9 @@ class Orchestrator:
 
         self.store.update_task(task.id, status="failed", sha=sha)
         aid = self.store.add_approval("retry", task.id, sha or "")
-        why = (last_check.output.splitlines()[-1] if last_check and last_check.output else "") or \
-              (last_run.error if last_run else "no run")
+        why = last_run.error if last_run else "no run"
+        if last_check and not last_check.tests_passed and last_check.output:
+            why = last_check.output.splitlines()[-1]
         note = " (other CLI not installed)" if skipped_switch else ""
         self.emit("needs_approval", aid,
                   f"Task {task.id} still failing after {rounds} round(s){note}: {why}\n"
@@ -421,18 +474,30 @@ class Orchestrator:
         return {"task_id": task.id, "passed": False, "sha": sha, "rounds": rounds}
 
     # ----------------------------------------------------------- merge --
-    def _merge(self, task_id: str, sha: str) -> None:
+    def _merge(self, task_id: str, sha: str) -> str:
         with self._lock:
-            ok, info = gitops.merge_sha(self.workspace, sha, f"bhima: merge task {task_id} ({sha[:10]})")
-        if not ok:
-            self.store.update_task(task_id, status="merge_failed")
-            self.emit("error", task_id, f"Merge of {sha[:10]} failed and was aborted: {info}")
-            return
-        self.store.update_task(task_id, status="merged")
-        self.emit("merged", task_id, f"Merged task {task_id} ({sha[:10]}) into main as {info[:10]}. Not pushed.")
+            task = self.store.get_task(task_id)
+            try:
+                ok, info = gitops.merge_sha(self.workspace, sha, f"bhima: merge task {task_id} ({sha[:10]})")
+            except (gitops.GitError, OSError) as exc:
+                ok, info = False, str(exc)
+            if not ok:
+                status = "merge_conflict" if "conflict" in info.lower() else "merge_failed"
+                self.store.update_task(task_id, status=status)
+                self._refresh_request(task["request_id"])
+                aid = self.store.add_approval("retry", task_id, info)
+                msg = f"Merge failed: {info}"
+                self.emit("needs_approval", aid, f"{msg}\nApprove to retry the task on current main.",
+                          ref=task["request_id"], task_id=task_id)
+                return msg
+            self.store.update_task(task_id, status="merged")
+            self._refresh_request(task["request_id"])
+        msg = f"Merged task {task_id} ({sha[:10]}) into main as {info[:10]}."
+        self.emit("merged", task_id, msg)
         runs = self._history(task_id)
         if runs:
             self._propose_memory(runs[-1])
+        return msg
 
     def _propose_memory(self, run: RunResult) -> None:
         entries = self.memory.propose(run)

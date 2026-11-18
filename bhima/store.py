@@ -197,8 +197,10 @@ class Store:
         return self._one("SELECT * FROM approvals WHERE (id=? OR target_id=?) AND status=?"
                          " ORDER BY created DESC", (target_id, target_id, status))
 
-    def decide_approval(self, aid: str, status: str) -> None:
-        self._exec("UPDATE approvals SET status=?, decided=? WHERE id=?", (status, time.time(), aid))
+    def decide_approval(self, aid: str, status: str) -> bool:
+        cur = self._exec("UPDATE approvals SET status=?, decided=? WHERE id=? AND status='pending'",
+                         (status, time.time(), aid))
+        return cur.rowcount == 1
 
     # -- events ----------------------------------------------------------
     def add_event(self, kind: str, ref: str, message: str, data: dict | None = None) -> int:
