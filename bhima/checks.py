@@ -1,4 +1,4 @@
-"""Checks: run the plan's test command in the workspace and parse "## Assumptions:".
+﻿"""Checks: run the plan's test command in the workspace and parse "## Assumptions:".
 
 `verify_hidden` additionally runs a demo task's hidden acceptance test (from
 demo/hidden_tests) against the workspace, then removes it again. Used by the
@@ -16,7 +16,7 @@ from pathlib import Path
 from . import config
 from .models import CheckResult, Task
 
-_HEADING = re.compile(r"^\s*#{1,6}\s*assumptions\s*:?\s*$|^\s*\**assumptions\**\s*:\s*$", re.I)
+_HEADING = re.compile(r"^\s*#{1,6}\s*assumptions\s*:?\s*$|^\s*\**\s*assumptions\s*:?\s*\**\s*:?\s*$", re.I)
 _NEXT_HEADING = re.compile(r"^\s*#{1,6}\s+\S")
 _NONE = {"none", "none.", "n/a", "no assumptions", "no assumptions.", "nothing"}
 

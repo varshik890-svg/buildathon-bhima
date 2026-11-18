@@ -1,4 +1,4 @@
-"""Git operations on the *workspace* repo (never on the Bhima repo, never push).
+﻿"""Git operations on the *workspace* repo (never on the Bhima repo, never push).
 
 A workspace is `.bhima/workspaces/<name>`, its own git repo created from
 demo/template. Each task works on branch `bhima/task-<id>`; approved SHAs are
@@ -94,7 +94,8 @@ def has_changes(ws: Path) -> bool:
 
 def commit_all(ws: Path, message: str) -> str | None:
     """Commit every change in the workspace (except .bhima). Returns SHA, or None if clean."""
-    git(ws, "add", "-A", "--", ".", ":(exclude).bhima")
+    git(ws, "add", "-A")
+    git(ws, "rm", "-r", "-q", "--cached", "--ignore-unmatch", ".bhima")
     staged = git(ws, "diff", "--cached", "--name-only").stdout.strip()
     if not staged:
         return None
