@@ -388,8 +388,13 @@ class Orchestrator:
             if first_cli is None:
                 first_cli = route.cli
             decision = _last_decision() if self.route_fn is _default_router else None
-            self.store.add_decision(task.id, rnd, {"route": to_dict(route), "router": decision})
+            self.store.add_decision(task.id, rnd, {"route": to_dict(route), "router": decision,
+                                                   "max_rounds": start_round + len(schedule)})
             pack = self.context_fn(task, ws, config.CONTEXT_BUDGET_TOKENS, history)
+            _, _, why = ("\n" + pack.text).partition("\n## Why these files\n")
+            why_lines = why.partition("\n\n")[0].splitlines()
+            self.store.add_event("context_pack", task.id, f"Context pack for {task.id} (round {rnd + 1})",
+                                 {"files": pack.files, "why_lines": why_lines})
             worker = self.worker_factory(route.cli)
             if hasattr(worker, "test_command"):
                 worker.test_command = test_command

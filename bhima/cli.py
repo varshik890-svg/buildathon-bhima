@@ -4,6 +4,7 @@
   demo <task-id> [--yes]   run one seeded task from demo/tasks.json (skips the planner)
   approve <id> / deny <id> decide a pending plan / merge / memory / retry approval
   status                   requests, tasks and pending approvals
+  dash [--once]            live terminal dashboard
   report                   rounds, tokens and time per task
   reset                    recreate the demo workspace from demo/template
   bot                      start the Telegram bot (same process runs the orchestrator)
@@ -13,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import time
 from pathlib import Path
@@ -85,6 +87,19 @@ def cmd_status(args) -> int:
 def cmd_report(args) -> int:
     print(report.render())
     return 0
+
+
+def cmd_dash(args) -> int:
+    from .dashboard import run
+    run(once=args.once, interval=args.interval)
+    return 0
+
+
+def _positive_interval(value: str) -> float:
+    interval = float(value)
+    if not math.isfinite(interval) or interval <= 0:
+        raise argparse.ArgumentTypeError("interval must be a positive number")
+    return interval
 
 
 def cmd_reset(args) -> int:
@@ -171,8 +186,6 @@ def cmd_baseline(args) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    config.load_env()
-    config.ensure_dirs()
     p = argparse.ArgumentParser(prog="bhima", description="Harness around Claude Code and Codex.")
     sub = p.add_subparsers(dest="cmd", required=True)
     a = sub.add_parser("ask", help="plan a request")
@@ -188,6 +201,10 @@ def main(argv: list[str] | None = None) -> int:
         s.add_argument("id")
         s.set_defaults(fn=fn)
     sub.add_parser("status").set_defaults(fn=cmd_status)
+    dash = sub.add_parser("dash", help="show the live terminal dashboard")
+    dash.add_argument("--once", action="store_true", help="print one plain-text frame")
+    dash.add_argument("--interval", type=_positive_interval, default=1.0, help="seconds between frames")
+    dash.set_defaults(fn=cmd_dash)
     sub.add_parser("report").set_defaults(fn=cmd_report)
     sub.add_parser("reset").set_defaults(fn=cmd_reset)
     sub.add_parser("bot").set_defaults(fn=cmd_bot)
@@ -199,6 +216,9 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--harness-only", action="store_true")
     b.set_defaults(fn=cmd_baseline)
     args = p.parse_args(argv)
+    if args.cmd != "dash":
+        config.load_env()
+        config.ensure_dirs()
     return int(args.fn(args) or 0)
 
 
