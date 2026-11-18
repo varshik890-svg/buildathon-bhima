@@ -37,7 +37,7 @@ def codex_model() -> str:
     try:
         from bhima import config
 
-        m = getattr(config, "CODEX_MODEL", None)
+        m = getattr(config, "CODEX_MODEL", None) or config.get("CODEX_MODEL")
         if m:
             return str(m)
     except Exception:

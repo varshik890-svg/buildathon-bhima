@@ -20,7 +20,7 @@ def _setting(name: str, default: str = "") -> str:
     try:
         from bhima import config  # owned by agent 1; optional here
 
-        val = getattr(config, name, None)
+        val = config.get(name) if hasattr(config, "get") else getattr(config, name, None)
         if val:
             return str(val)
     except Exception:
