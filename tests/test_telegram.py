@@ -346,3 +346,31 @@ def test_build_app_registers_owner_filtered_handlers():
     assert commands == {"start", "help", "ask", "status", "report", "memory", "skills", "scrape"}
     assert any(isinstance(h, CallbackQueryHandler) for h in handlers)
     assert "Chat" in repr(next(h for h in handlers if isinstance(h, CommandHandler)).filters)
+
+
+def test_backend_scrape_parses_desc(monkeypatch):
+    seen = {}
+
+    def fake_scrape(url, sort_by=None, desc=False):
+        seen.update(url=url, sort_by=sort_by, desc=desc)
+        return []
+
+    backend = tb.Backend()
+    monkeypatch.setattr(backend, "_mod", lambda name: SimpleNamespace(scrape=fake_scrape))
+    backend.scrape("https://x.io", "unit price desc")
+    assert seen == {"url": "https://x.io", "sort_by": "unit price", "desc": True}
+    backend.scrape("https://x.io", None)
+    assert seen["sort_by"] is None and seen["desc"] is False
+
+
+def test_backend_uses_module_level_orchestrator(monkeypatch):
+    calls = []
+    orch = SimpleNamespace(submit=lambda r: calls.append(r) or "r9", status=lambda: "busy",
+                           approve=lambda i: calls.append(("a", i)), deny=lambda i: None,
+                           on_event=lambda cb: None)
+    backend = tb.Backend()
+    monkeypatch.setattr(backend, "_mod", lambda name: orch)
+    assert backend.submit("x") == "r9"
+    assert backend.status() == "busy"
+    backend.approve("t1")
+    assert calls == ["x", ("a", "t1")]

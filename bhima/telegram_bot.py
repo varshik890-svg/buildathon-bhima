@@ -64,8 +64,12 @@ def load_settings() -> tuple[str, str]:
     token = chat_id = ""
     try:
         cfg = importlib.import_module("bhima.config")
-        token = str(getattr(cfg, "TELEGRAM_BOT_TOKEN", "") or "")
-        chat_id = str(getattr(cfg, "TELEGRAM_CHAT_ID", "") or "")
+        if callable(getattr(cfg, "get", None)):
+            token = str(cfg.get("TELEGRAM_BOT_TOKEN") or "")
+            chat_id = str(cfg.get("TELEGRAM_CHAT_ID") or "")
+        else:
+            token = str(getattr(cfg, "TELEGRAM_BOT_TOKEN", "") or "")
+            chat_id = str(getattr(cfg, "TELEGRAM_CHAT_ID", "") or "")
     except Exception:  # config not ready or broken: fall back
         pass
     dotenv = _read_dotenv(Path(__file__).resolve().parent.parent / ".env")
@@ -261,7 +265,13 @@ class Backend:
         return str(self._mod("skills").index())
 
     def scrape(self, url: str, sort_by: str | None) -> list[dict]:
-        return list(self._mod("scrape").scrape(url, sort_by))
+        desc = False
+        if sort_by:
+            words = sort_by.split()
+            if words[-1].lower() in ("desc", "asc"):
+                desc = words.pop().lower() == "desc"
+            sort_by = " ".join(words) or None
+        return list(self._mod("scrape").scrape(url, sort_by, desc=desc))
 
 
 # ------------------------------------------------------------------- bot ---
