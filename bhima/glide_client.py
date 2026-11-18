@@ -40,7 +40,8 @@ def _headers() -> dict:
     return h
 
 
-def decide(state: dict, questions: dict, timeout: float = 5) -> dict | None:
+def decide(state: dict, questions: dict, timeout: float = 20) -> dict | None:
+    # GLiDE-0.4B on CPU answers three routing questions in ~4 s, so 5 s was too tight under load.
     """POST state+questions; return {question_name: answer_dict} or None."""
     body = json.dumps({"model": MODEL_NAME, "state": state, "questions": questions}).encode()
     req = urllib.request.Request(base_url() + "/v1/systemone", data=body,
