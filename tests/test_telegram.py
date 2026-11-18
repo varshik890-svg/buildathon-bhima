@@ -334,3 +334,15 @@ def test_load_settings_reads_env(monkeypatch):
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
     token, chat = tb.load_settings()
     assert token and chat  # values come from config, env or .env; never printed
+
+
+def test_build_app_registers_owner_filtered_handlers():
+    pytest.importorskip("telegram")
+    from telegram.ext import CallbackQueryHandler, CommandHandler
+    bot = tb.BhimaBot("123456:FAKE-token-for-tests", OWNER, FakeBackend())
+    app = bot.build_app()  # no network: Application is only constructed
+    handlers = app.handlers[0]
+    commands = {c for h in handlers if isinstance(h, CommandHandler) for c in h.commands}
+    assert commands == {"start", "help", "ask", "status", "report", "memory", "skills", "scrape"}
+    assert any(isinstance(h, CallbackQueryHandler) for h in handlers)
+    assert "Chat" in repr(next(h for h in handlers if isinstance(h, CommandHandler)).filters)

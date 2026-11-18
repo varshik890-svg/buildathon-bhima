@@ -273,6 +273,7 @@ class BhimaBot:
         self.backend = backend or Backend()
         self.app: Any = None
         self.loop: asyncio.AbstractEventLoop | None = None
+        self._tasks: set[asyncio.Task] = set()
 
     # ---- auth
     def _allowed(self, update: Any) -> bool:
@@ -369,7 +370,9 @@ class BhimaBot:
             return
         await self._reply(update, "Got it. Planning...")
         # submit may run the whole flow; do not block the loop or the handler
-        asyncio.create_task(self._submit_bg(update, text))
+        task = asyncio.create_task(self._submit_bg(update, text))
+        self._tasks.add(task)  # keep a reference so the task is not GC'd
+        task.add_done_callback(self._tasks.discard)
 
     async def _submit_bg(self, update: Any, text: str) -> None:
         request_id = await self._call(update, self.backend.submit, text)
