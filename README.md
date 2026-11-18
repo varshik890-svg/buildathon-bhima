@@ -139,6 +139,7 @@ Every miss costs another round, more subscription usage and more trust.
 | Step | What Bhima does |
 |---|---|
 | Plan | Turns the request into small tasks. The human approves the plan (CLI or Telegram button). The planner has no tools. |
+| **Local Talker** | A small **local model** (Qwen3-4B on llama.cpp, `127.0.0.1:8791`, on the laptop's GPU) plans first and answers plain Telegram chat. That costs no subscription usage. If it's down or returns an invalid plan, Claude Haiku plans instead, then an offline planner. Every plan shows `planned by: talker-local / claude-haiku / offline`. |
 | **Route** | Picks the **CLI, model and effort level** per task: the GLiDE decision model first (typed `choice`/`noul`/`score` questions with a confidence score), then a rule table. It escalates after failures and switches CLI after repeated failures. |
 | **Context** | Builds a **context pack**: a repo map, **BM25F-ranked files** with a "why these files" list, memory and the skill index, all within a token budget. |
 | Run | Runs the worker on a task branch in a separate workspace repo, with a fixed allowed-tools list and a cleaned environment. |
