@@ -123,6 +123,8 @@ See [RULES.md](RULES.md) for the full list.
 - **Team:** bhima (varshik890-svg)
 - **Track:** Build for AI Agents (`ai-agents`)
 
+> **Evaluators:** the [walkthrough below](#for-evaluators-walkthrough-and-testing) shows how to check everything in about 10 minutes: the test suite, a live run, the benchmark, and a code tour.
+
 ### Problem: who has it and why it happens
 
 Developers who hand coding tasks to agents like **Claude Code** and **Codex** often get a first answer that is wrong, or only *looks* right. This isn't the model being lazy. There are three structural reasons:
@@ -210,6 +212,71 @@ Method (the same idea as [HarnessBench](https://github.com/reacher-z/HarnessBenc
 - **fewer tokens overall,** most of all where ranked context matters (−40% on t6)
 
 **Next benchmarks:** Python exercises from the public [Aider polyglot benchmark](https://github.com/Aider-AI/polyglot-benchmark), and a Bhima adapter for [Harbor / Terminal-Bench 2.0](https://github.com/harbor-framework/harbor), which already includes Claude Code and Codex as agents.
+
+## For evaluators: walkthrough and testing
+
+### 1. The test suite: 124 tests, no network, about 1 minute
+
+```powershell
+python -m venv .venv; .\.venv\Scripts\pip install -r requirements.txt
+.\.venv\Scripts\python -m pytest -q        # expected: 124 passed
+```
+
+Every test uses **fakes** for Claude Code, Codex, the Talker, GLiDE and Telegram, so the whole suite runs offline with no accounts.
+
+| Test file | Tests | What it proves |
+|---|---|---|
+| `tests/test_core.py` | 46 | The full workflow and its state machine: plan → approve → route → pack → worker → checks → retry (twice, then the other CLI) → merge approval → merge **by exact SHA**. Hidden acceptance tests run on a clean worktree. Failed checks count as failures in routing. Honest statuses and merge-conflict retry. A trusted test command (never the planner's). A scrubbed child environment. The Codex-through-WSL command builder: path translation, quoting, model and effort allow-list, prompt on stdin. |
+| `tests/test_intel.py` | 23 | **Context ranking** (BM25F: file mentions, definition matches, test pairing, budget). The router's GLiDE-first logic and rule fallback. Memory caps (Hermes-style). The skills index. Scrape parsing and numeric sorting. Planner fallback order (Talker → Haiku → offline). |
+| `tests/test_telegram.py` | 33 | **Owner-only access** (chat ID *and* user ID). Approve and Deny buttons. Message splitting. Event relay. Talker chat versus `/ask`. |
+| `tests/test_talker.py` | 9 | The local Talker client: health check, JSON plans, returns None on failure, timeouts. |
+| `tests/test_tui.py` | 8 | The Textual TUI, driven by Textual's test pilot: chat, `/ask`, approval keys, an empty store. |
+| `tests/test_dashboard.py` | 5 | Dashboard frames: GLiDE percentages, "planned by", checks, totals, an empty database. |
+
+### 2. A live run, about 2 minutes (needs Claude Code logged in)
+
+```powershell
+.\.venv\Scripts\python -m bhima reset
+.\.venv\Scripts\python -m bhima demo t6 --yes      # plan is auto-approved; watch route, round, checks
+.\.venv\Scripts\python -m bhima approve <id>       # the merge id it prints
+.\.venv\Scripts\python -m bhima report
+```
+
+Or the interactive version: `python -m bhima tui`, then `/ask …` and ctrl+a. Optional local models:
+- Talker: any llama.cpp server on `TALKER_URL`, default `127.0.0.1:8791`
+- GLiDE: `scripts/run_glide.sh` in WSL
+
+Without them, Bhima falls back to Claude Haiku planning and rule routing.
+
+### 3. The benchmark: fix the model, vary the harness
+
+```powershell
+.\.venv\Scripts\python -m bhima baseline                 # all 7 tasks: plain claude -p vs Bhima
+.\.venv\Scripts\python -m bhima baseline --tasks t6      # one task, about 1 minute
+```
+
+- Both sides use the **same model**; only the harness differs.
+- Both are scored by **hidden acceptance tests** (`demo/hidden_tests/`) that neither agent sees.
+- For t6 and t7, the hidden checks were shown to **fail on the unfixed code and on a plausible partial fix**, and to pass only on the correct fix.
+- All three runs from today, with their raw tables, are in [`demo/results/baseline.md`](demo/results/baseline.md).
+
+### 4. A code tour: where the hardest parts are
+
+| What | File | Look for |
+|---|---|---|
+| Context ranking | `bhima/context.py` | BM25F scoring, mention and definition bonuses, test pairing, the "why these files" list, the token budget |
+| Proof instead of trust | `bhima/checks.py`, `bhima/gitops.py` | Hidden tests on a clean worktree of the candidate SHA; merge of the approved SHA only, never pushing |
+| Routing | `bhima/router.py`, `bhima/glide_client.py` | The GLiDE `choice`/`noul`/`score` questions, the confidence threshold, the rule fallback, escalation after failures |
+| The workflow | `bhima/orchestrator.py` | The state machine, retries, approvals, events |
+| Workers | `bhima/workers/claude.py`, `bhima/workers/codex.py` | Fixed tools, the `--effort` fallback, Codex through WSL, timeouts that kill the whole process tree |
+| Memory and skills | `bhima/memory.py`, `bhima/skills.py` | Capped `MEMORY.md`/`USER.md`, proposals you approve, progressive skill loading |
+| Interfaces | `bhima/tui.py`, `bhima/dashboard.py`, `bhima/telegram_bot.py` | Live sidebar, dashboard panels, owner-only bot |
+
+### 5. Build history
+
+- **Everything was written during the event**, in small commits starting with the `register: bhima` commit at 15:43 IST. There was no force-push or rebase, and the genesis commit is intact.
+- **Parallel AI agents** (Claude Code and Codex, each owning separate files) built it from the contract in `ARCHITECTURE.md`. A human reviewed each step.
+- **Two independent reviews** (an EGM review and a Codex review) drove the security and correctness fixes. They're visible as `fix(...)` commits.
 
 ### Honest limits (today)
 
