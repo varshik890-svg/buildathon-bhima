@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
-from bhima import checks, gitops, report
+from bhima import checks, config, gitops, report
 from bhima.models import ContextPack, Plan, Route, RunResult, Task
 from bhima.orchestrator import Orchestrator
 from bhima.store import Store
@@ -390,20 +393,135 @@ def test_codex_jsonl_parsing():
              {"type": "turn.completed", "usage": {"input_tokens": 7, "cached_input_tokens": 2, "output_tokens": 3}},
              {"type": "item.completed", "item": {"type": "agent_message", "text": REPORT_OK}},
              {"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 1}}]
-    msg, usage, err = wcodex.parse_jsonl("\n".join(json.dumps(x) for x in lines))
+    msg, usage, err = wcodex.parse_jsonl("warning\n{invalid json}\n" + "\n".join(json.dumps(x) for x in lines))
     assert msg == REPORT_OK and err is None
-    assert usage["input_tokens"] == 8 and usage["output_tokens"] == 4 and usage["turns"] == 2
+    assert usage == {"input_tokens": 8, "cached_input_tokens": 2, "output_tokens": 4, "turns": 2}
+
+
+@pytest.mark.parametrize("event", [
+    {"type": "error", "message": "request failed"},
+    {"type": "turn.failed", "error": {"message": "request failed"}},
+])
+def test_codex_jsonl_errors(event):
+    assert wcodex.parse_jsonl(json.dumps(event))[2] == "request failed"
+
+
+def test_codex_native_command():
     cmd = wcodex.build_cmd("codex", Route("codex", "gpt-5.5", "high", False, 1, "rules", ""), Path("w"))
-    assert 'model_reasoning_effort="high"' in cmd and "workspace-write" in cmd
-    assert not any("dangerously" in c for c in cmd)
+    assert cmd == ["codex", "exec", "--json", "-m", "gpt-5.5", "-c", 'model_reasoning_effort="high"',
+                   "--sandbox", "workspace-write", "-C", "w", "-"]
+
+
+@pytest.mark.parametrize(("workspace", "wsl_path"), [
+    (r"C:\Users\x", "/mnt/c/Users/x"),
+    (r"E:\Users\O'Brien & $USER\`work`", "/mnt/e/Users/O'Brien & $USER/`work`"),
+])
+def test_codex_wsl_command(workspace, wsl_path):
+    route = Route("codex", "custom_model-1.2", "medium", False, 1, "rules", "")
+    cmd = wcodex.build_cmd("wsl.exe", route, PureWindowsPath(workspace), via_wsl=True)
+    assert cmd[:-1] == ["wsl.exe", "-d", "Ubuntu", "--shell-type", "none", "--", "bash", "-lc"]
+    assert f"cd {shlex.quote(wsl_path)} &&" in cmd[-1]
+    assert shlex.split(cmd[-1]) == [
+        "source", "~/.nvm/nvm.sh", "&&", "cd", wsl_path, "&&", "exec", "timeout", "--signal=KILL",
+        str(config.WORKER_TIMEOUT_S), "codex", "exec", "--json", "-m", "custom_model-1.2", "-c",
+        'model_reasoning_effort="medium"', "--sandbox", "workspace-write", "-",
+    ]
+
+
+@pytest.mark.parametrize(("model", "effort", "error"), [
+    ("", "low", "Invalid Codex model"),
+    ("gpt-5.5; echo invalid", "low", "Invalid Codex model"),
+    ("claude$(echo invalid)", "low", "Invalid Codex model"),
+    ("gpt-5.5", "xhigh", "Invalid Codex reasoning effort"),
+    ("gpt-5.5", 'high"; echo invalid', "Invalid Codex reasoning effort"),
+])
+def test_codex_rejects_invalid_launch_options(monkeypatch, tmp_path, model, effort, error):
+    route = Route("codex", model, effort, False, 1, "rules", "")
+    with pytest.raises(ValueError, match=error):
+        wcodex.build_cmd("wsl.exe", route, tmp_path, via_wsl=True)
+    monkeypatch.setattr(config, "codex_via_wsl", lambda: True)
+    monkeypatch.setattr(wcodex, "find_exe", lambda name: "fake-wsl")
+    monkeypatch.setattr(wcodex, "run_cli", lambda *a, **kw: pytest.fail("invalid launch must be refused"))
+    task = make_plan().tasks[0]
+    result = wcodex.CodexWorker().run(task, ContextPack(task.id, "", [], 0), route, tmp_path, 0)
+    assert not result.ok and result.error.startswith(error)
+
+
+@pytest.mark.parametrize(("os_name", "override", "expected"), [
+    ("nt", "", True), ("posix", "", False), ("nt", "false", False), ("posix", "true", True),
+])
+def test_codex_wsl_config(monkeypatch, tmp_path, os_name, override, expected):
+    monkeypatch.delenv("CODEX_VIA_WSL", raising=False)
+    monkeypatch.setattr(config, "os", SimpleNamespace(name=os_name, environ=config.os.environ))
+    monkeypatch.setattr(config, "_env_values", None)
+    dotenv = tmp_path / ".env"
+    dotenv.write_text(f"CODEX_VIA_WSL={override}\n" if override else "", encoding="utf-8")
+    config.load_env(dotenv)
+    assert config.codex_via_wsl() is expected
+
+
+@pytest.mark.parametrize(("returncode", "error"), [(0, None), (137, "timeout")])
+def test_codex_wsl_worker_passes_prompt_on_stdin(monkeypatch, tmp_path, returncode, error):
+    task = make_plan().tasks[0]
+    task.detail = "first line\nsecond line with 'quotes' and $(shell text)"
+    pack = ContextPack(task.id, "", [], 0)
+    route = Route("codex", "gpt-5.5", "low", False, 1, "rules", "")
+    calls = []
+
+    def find_exe(name):
+        assert name == "wsl.exe"
+        return "fake-wsl.exe"
+
+    def run_cli(cmd, cwd, *, timeout, stdin_text, kill_tree):
+        assert cwd == tmp_path and kill_tree and timeout > config.WORKER_TIMEOUT_S
+        assert cmd[0] == "fake-wsl.exe" and task.detail not in cmd[-1]
+        assert stdin_text == wbase.build_prompt(task, pack)
+        calls.append(cmd)
+        event = {"type": "item.completed", "item": {"type": "agent_message", "text": REPORT_OK}}
+        return returncode, json.dumps(event), "", 0.1, False
+
+    monkeypatch.setattr(config, "codex_via_wsl", lambda: True)
+    monkeypatch.setattr(wcodex, "find_exe", find_exe)
+    monkeypatch.setattr(wcodex, "run_cli", run_cli)
+    monkeypatch.setattr(wcodex, "save_raw", lambda *args: "fake-run.json")
+    result = wcodex.CodexWorker().run(task, pack, route, tmp_path, 0)
+    assert len(calls) == 1 and result.ok is (error is None)
+    assert result.error == error and result.report == REPORT_OK
 
 
 def test_codex_missing_returns_error(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "codex_via_wsl", lambda: False)
     monkeypatch.setattr(wcodex, "find_exe", lambda name: None)
     t = Task("t9", "r", "x", "y", "code", [], [])
     r = wcodex.CodexWorker().run(t, ContextPack("t9", "", [], 0), Route("codex", "m", "low", False, 1, "rules", ""),
                                  tmp_path, 0)
     assert r.ok is False and r.error == "codex not installed"
+
+
+@pytest.mark.parametrize("os_name", ["nt", "posix"])
+def test_worker_timeout_kills_process_tree(monkeypatch, tmp_path, os_name):
+    cmd = ["fake-worker"]
+    proc = MagicMock(pid=123)
+    proc.__enter__.return_value = proc
+    proc.communicate.side_effect = [subprocess.TimeoutExpired(cmd, 1), ("partial output", "")]
+    popen = MagicMock(return_value=proc)
+    taskkill = MagicMock()
+    killpg = MagicMock()
+    monkeypatch.setattr(wbase, "os", SimpleNamespace(name=os_name, killpg=killpg))
+    monkeypatch.setattr(wbase, "signal", SimpleNamespace(SIGKILL=9))
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    monkeypatch.setattr(subprocess, "run", taskkill)
+
+    code, out, err, _, timed_out = wbase.run_cli(cmd, tmp_path, timeout=1, stdin_text="prompt", kill_tree=True)
+
+    assert (code, out, err, timed_out) == (-1, "partial output", "", True)
+    assert popen.call_args.kwargs["start_new_session"] is (os_name == "posix")
+    assert proc.communicate.call_args_list[0].args == ("prompt",)
+    if os_name == "nt":
+        assert taskkill.call_args.args[0] == ["taskkill.exe", "/F", "/T", "/PID", "123"]
+        proc.kill.assert_called_once()
+    else:
+        killpg.assert_called_once_with(123, 9)
 
 
 def test_planner_and_worker_get_clean_child_environment(tmp_path, monkeypatch):

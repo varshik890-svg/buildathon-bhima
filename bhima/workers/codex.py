@@ -1,25 +1,51 @@
-"""Codex worker: `codex exec --json ... --sandbox workspace-write -C <workspace>`.
+"""Run Codex in the workspace, using Ubuntu on Windows by default.
 
-The prompt is passed as `-` (read from stdin) so multi-line prompts survive the
-Windows .cmd shim. Parses JSONL: turn.completed usage + the final agent message.
+Prompts are read from stdin. The JSONL stream provides usage, messages and errors.
 """
 from __future__ import annotations
 
 import json
-from pathlib import Path
+import re
+import shlex
+from pathlib import Path, PureWindowsPath
 
 from .. import config
 from ..models import ContextPack, Route, RunResult, Task
 from .base import build_prompt, find_exe, run_cli, save_raw
 
 DEFAULT_MODEL = "gpt-5.5"
+WSL_TIMEOUT_GRACE_S = 5
 
 
-def build_cmd(exe: str, route: Route, workdir: Path) -> list[str]:
-    model = route.model if route.model and not route.model.startswith(("claude", "sonnet", "opus", "haiku")) \
-        else DEFAULT_MODEL
-    return [exe, "exec", "--json", "-m", model, "-c", f'model_reasoning_effort="{route.effort}"',
-            "--sandbox", "workspace-write", "--skip-git-repo-check", "-C", str(workdir), "-"]
+def _wsl_path(workdir: Path | PureWindowsPath) -> str:
+    path = PureWindowsPath(workdir)
+    if path.is_absolute() and re.fullmatch(r"[a-zA-Z]:", path.drive):
+        return "/".join(("", "mnt", path.drive[0].lower(), *path.parts[1:]))
+    if not path.drive and str(workdir).startswith("/"):
+        return workdir.as_posix()
+    raise ValueError("Codex via WSL requires an absolute drive or Linux workspace path")
+
+
+def build_cmd(exe: str, route: Route, workdir: Path | PureWindowsPath, *,
+              via_wsl: bool = False) -> list[str]:
+    model = route.model
+    if not isinstance(model, str) or not re.fullmatch(r"[a-zA-Z0-9._-]+", model):
+        raise ValueError("Invalid Codex model. Use letters, digits, dots, underscores or hyphens.")
+    if model.startswith(("claude", "sonnet", "opus", "haiku")):
+        model = DEFAULT_MODEL
+    if route.effort not in ("low", "medium", "high"):
+        raise ValueError("Invalid Codex reasoning effort. Use low, medium or high.")
+
+    args = ["exec", "--json", "-m", model, "-c", f'model_reasoning_effort="{route.effort}"',
+            "--sandbox", "workspace-write"]
+    if via_wsl:
+        # The Windows relay can exit while its Linux command is still running.
+        # GNU timeout signals the Codex process group inside Ubuntu.
+        codex_cmd = shlex.join(["timeout", "--signal=KILL", str(config.WORKER_TIMEOUT_S), "codex", *args, "-"])
+        script = f"source ~/.nvm/nvm.sh && cd {shlex.quote(_wsl_path(workdir))} && exec {codex_cmd}"
+        # Give Bash the script as one argument without a second shell expanding it.
+        return [exe, "-d", "Ubuntu", "--shell-type", "none", "--", "bash", "-lc", script]
+    return [exe, *args, "-C", str(workdir), "-"]
 
 
 def parse_jsonl(stdout: str) -> tuple[str, dict, str | None]:
@@ -59,13 +85,22 @@ class CodexWorker:
 
     def run(self, task: Task, pack: ContextPack, route: Route, workdir: Path, round: int,
             feedback: str = "") -> RunResult:
-        exe = self.exe or find_exe("codex")
+        via_wsl = config.codex_via_wsl()
+        exe = find_exe("wsl.exe") if via_wsl else self.exe or find_exe("codex")
         if not exe:
+            missing = "wsl.exe" if via_wsl else "codex"
             return RunResult(task.id, round, self.name, False, "", [], {}, 0.0, "",
-                             error="codex not installed")
+                             error=f"{missing} not installed")
+        workdir = Path(workdir).absolute()
         prompt = build_prompt(task, pack, feedback, self.test_command)
-        cmd = build_cmd(exe, route, Path(workdir))
-        code, out, err, secs, timed_out = run_cli(cmd, Path(workdir), stdin_text=prompt)
+        timeout = config.WORKER_TIMEOUT_S + (WSL_TIMEOUT_GRACE_S if via_wsl else 0)
+        try:
+            cmd = build_cmd(exe, route, workdir, via_wsl=via_wsl)
+            code, out, err, secs, timed_out = run_cli(cmd, workdir, timeout=timeout, stdin_text=prompt,
+                                                      kill_tree=True)
+        except (OSError, ValueError) as exc:
+            return RunResult(task.id, round, self.name, False, "", [], {}, 0.0, "", error=str(exc))
+        timed_out = timed_out or (via_wsl and code in (137, -9))
         message, usage, ev_error = parse_jsonl(out)
         raw_path = save_raw(self.name, task.id, round, {
             "cmd": cmd, "prompt": prompt, "returncode": code, "stdout": out,

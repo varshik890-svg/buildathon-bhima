@@ -57,6 +57,11 @@ def get(key: str, default: str = "") -> str:
     return os.environ.get(key, values.get(key, default))
 
 
+def codex_via_wsl() -> bool:
+    default = "true" if os.name == "nt" else "false"
+    return get("CODEX_VIA_WSL", default).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def child_env() -> dict[str, str]:
     secret_markers = ("TOKEN", "KEY", "SECRET", "PASSWORD")
     return {name: value for name, value in os.environ.items()
