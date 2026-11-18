@@ -8,6 +8,7 @@ import argparse
 import csv
 import io
 import json
+import os
 import re
 import sys
 import urllib.request
@@ -149,7 +150,7 @@ def numeric(v) -> float | None:
     """'1,200' -> 1200, '$15.5' -> 15.5, '3.2k' -> 3200, '42%' -> 42; else None."""
     if isinstance(v, (int, float)):
         return float(v)
-    m = _NUM.match(str(v).strip())
+    m = _NUM.match(str(v).strip().replace("−", "-").replace("–", "-"))
     if not m:
         return None
     n = float(m.group(1).replace(",", ""))
@@ -184,8 +185,42 @@ def sort_rows(rows: list[dict], key: str, desc: bool = False) -> list[dict]:
 
 
 def scrape(url: str, sort_by: str | None = None, desc: bool = False) -> list[dict]:
-    rows = parse(fetch(url))
-    return sort_rows(rows, sort_by, desc) if sort_by else rows
+    """url may be http(s) or a local .html path (handy for saved pages)."""
+    if not re.match(r"^https?://", url, re.I) and os.path.isfile(url):
+        with open(url, encoding="utf-8", errors="replace") as f:
+            html = f.read(MAX_BYTES)
+    else:
+        html = fetch(url)
+    rows = parse(html)
+    if not sort_by:
+        return rows
+    return sort_rows(best_group(rows, sort_by), sort_by, desc)
+
+
+def best_group(rows: list[dict], key: str) -> list[dict]:
+    """Pages carry many tables (navboxes, footers). Keep the one that has the
+    sort column, preferring exact > case-insensitive > substring header match,
+    then the table with the most numeric values in that column."""
+    groups: dict = {}
+    for r in rows:
+        groups.setdefault(("t", r["_table"]) if "_table" in r else ("l", r.get("list")), []).append(r)
+
+    def rank(g):
+        cols = _columns(g)
+        k = key.lower()
+        if key in cols:
+            q, col = 3, key
+        elif any(c.lower() == k for c in cols):
+            q, col = 2, next(c for c in cols if c.lower() == k)
+        elif any(k in c.lower() for c in cols):
+            q, col = 1, next(c for c in cols if k in c.lower())
+        else:
+            return (0, 0, 0)
+        nums = sum(numeric(r.get(col, "")) is not None for r in g)
+        return (q, nums, len(g))
+
+    best = max(groups.values(), key=rank, default=[])
+    return best if rank(best)[0] else rows
 
 
 def _columns(rows: list[dict]) -> list[str]:

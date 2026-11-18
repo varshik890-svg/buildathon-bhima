@@ -214,6 +214,15 @@ def test_scrape_parse_and_numeric_sort():
     assert scrape.to_csv(table).splitlines()[0] == "Name,Price,_table"
 
 
+def test_scrape_picks_table_with_sort_column_and_reads_local_file(tmp_path):
+    page = tmp_path / "p.html"
+    nav = "<table><tr><th>Links</th></tr><tr><td>Population stats</td></tr></table>"
+    page.write_text(nav + HTML, encoding="utf-8")
+    rows = scrape.scrape(str(page), sort_by="price", desc=True)
+    assert [r["Name"] for r in rows][:3] == ["Widget", "Doohickey", "Gadget"]
+    assert scrape.numeric("−0.18%") == -0.18
+
+
 def test_scrape_rejects_non_http():
     with pytest.raises(ValueError):
         scrape.fetch("file:///etc/passwd")
