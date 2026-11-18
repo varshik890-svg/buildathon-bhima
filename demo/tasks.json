@@ -1,0 +1,51 @@
+{
+  "project": "invoice",
+  "test_command": "python -m pytest -q",
+  "tasks": [
+    {
+      "id": "t1",
+      "kind": "code",
+      "title": "Fix bulk discount boundary",
+      "detail": "Customers ordering exactly 10 units of a line are not getting the 5% bulk discount. The business rule is: a line with quantity >= BULK_THRESHOLD (10) gets BULK_DISCOUNT. Fix invoice/pricing.py and add a regression test for quantity == 10 (expected line_total for 10 x 10.0 is 95.0).",
+      "files_hint": ["invoice/pricing.py", "tests/test_pricing.py"],
+      "acceptance": ["line_total(LineItem('pen', 10, 10.0)) == 95.0", "quantity 9 gets no discount", "all tests pass"],
+      "hidden_test": "hidden_tests/test_hidden_t1.py"
+    },
+    {
+      "id": "t2",
+      "kind": "code",
+      "title": "Add CSV export",
+      "detail": "Add invoice/export.py with to_csv(invoice) -> str. Header row: description,quantity,unit_price,category,line_total. One row per item with unit_price and line_total formatted with two decimals (e.g. 10.00). Last row: TOTAL,,,,<grand total incl. GST, two decimals>. Use the csv module. Add tests.",
+      "files_hint": ["invoice/export.py", "invoice/pricing.py", "invoice/tax.py"],
+      "acceptance": ["header row exact", "item rows use two-decimal strings", "last row starts with TOTAL and ends with grand_total"],
+      "hidden_test": "hidden_tests/test_hidden_t2.py"
+    },
+    {
+      "id": "t3",
+      "kind": "code",
+      "title": "Refactor rounding into currency.round_money",
+      "detail": "Rounding with round(x, 2) is duplicated across pricing.py and tax.py and uses banker's/float rounding (round(2.675, 2) == 2.67). Add round_money(amount: float) -> float to invoice/currency.py using decimal.Decimal(str(amount)) quantized to 0.01 with ROUND_HALF_UP, and replace every round(...) call in pricing.py and tax.py with round_money. Behaviour of existing tests must not change.",
+      "files_hint": ["invoice/currency.py", "invoice/pricing.py", "invoice/tax.py"],
+      "acceptance": ["round_money(2.675) == 2.68", "no bare round( calls left in pricing.py/tax.py", "all tests pass"],
+      "hidden_test": "hidden_tests/test_hidden_t3.py"
+    },
+    {
+      "id": "t4",
+      "kind": "code",
+      "title": "Add input validation to LineItem",
+      "detail": "LineItem accepts garbage today. Add __post_init__ validation raising ValueError when: description is empty/whitespace, quantity <= 0, unit_price < 0, or category is not one of the GST categories in invoice/tax.py (standard, essential, exempt). parse_items must raise ValueError whose message includes the 1-based data row number, e.g. 'row 2: quantity must be positive'. Avoid a circular import between models.py and tax.py.",
+      "files_hint": ["invoice/models.py", "invoice/parsing.py", "invoice/tax.py"],
+      "acceptance": ["invalid items raise ValueError", "parse_items error mentions 'row N'", "all tests pass"],
+      "hidden_test": "hidden_tests/test_hidden_t4.py"
+    },
+    {
+      "id": "t5",
+      "kind": "scrape",
+      "title": "Load supplier price list and sort it",
+      "detail": "Our supplier publishes a price list page (saved at data/supplier_prices.html). Add invoice/catalog.py with load_catalog(path: str, sort_by: str = 'price', descending: bool = False) -> list[dict] that extracts the table rows as dicts with keys sku, item, category, price (float), stock (int), sorted by the sort_by column. Use only the standard library (html.parser). Use the scrape skill. Add tests.",
+      "files_hint": ["data/supplier_prices.html", "invoice/catalog.py"],
+      "acceptance": ["6 rows parsed", "price is float, stock is int", "sorted by price desc gives RC-01 first"],
+      "hidden_test": "hidden_tests/test_hidden_t5.py"
+    }
+  ]
+}
