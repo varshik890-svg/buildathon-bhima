@@ -13,16 +13,14 @@ import subprocess
 import uuid
 from pathlib import Path
 
+from bhima import config
 from bhima.models import Plan, Task
-
-DEFAULT_TEST_COMMAND = "python -m pytest -q"
 KINDS = ("code", "scrape", "question")
 
 PLAN_SCHEMA = {
     "type": "object",
     "properties": {
         "summary": {"type": "string"},
-        "test_command": {"type": "string"},
         "tasks": {
             "type": "array", "minItems": 1, "maxItems": 3,
             "items": {
@@ -67,10 +65,6 @@ def _list_files(project_dir: Path, limit: int = 60) -> list[str]:
         return []
 
 
-def _detect_test_command(project_dir: Path) -> str:
-    return DEFAULT_TEST_COMMAND
-
-
 def _to_plan(data: dict, request: str, project_dir: Path, request_id: str) -> Plan:
     known = set(_list_files(project_dir, 500))
     tasks = []
@@ -87,7 +81,7 @@ def _to_plan(data: dict, request: str, project_dir: Path, request_id: str) -> Pl
     if not tasks:
         raise ValueError("plan had no tasks")
     return Plan(id=_new_id("p"), request_id=request_id, tasks=tasks,
-                test_command=(data.get("test_command") or "").strip() or _detect_test_command(project_dir),
+                test_command=config.DEFAULT_TEST_COMMAND,
                 summary=str(data.get("summary") or request[:120]))
 
 
@@ -119,11 +113,13 @@ def make_plan(request: str, project_dir: Path, request_id: str | None = None, ti
     exe = _claude_exe()
     if exe:
         prompt = PROMPT.format(files="\n".join(_list_files(project_dir)) or "(empty)", request=request)
-        cmd = [exe, "-p", prompt, "--output-format", "json", "--model", "haiku", "--effort", "low",
+        cmd = [exe, "-p", "--output-format", "json", "--model", "haiku", "--effort", "low",
+               "--tools", "", "--disallowedTools", "*", "--strict-mcp-config",
                "--json-schema", json.dumps(PLAN_SCHEMA)]
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                                  timeout=timeout, cwd=str(project_dir) if project_dir.exists() else None)
+            proc = subprocess.run(cmd, input=prompt, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                                  timeout=timeout, cwd=str(project_dir) if project_dir.exists() else None,
+                                  env=config.child_env())
             outer = json.loads(proc.stdout or "{}")
             data = outer.get("structured_output")
             if isinstance(data, str):
@@ -185,7 +181,7 @@ def make_plan_offline(request: str, project_dir: Path, request_id: str | None = 
         kind = _guess_kind(p)
         acceptance = []
         if kind == "code":
-            acceptance.append(f"`{DEFAULT_TEST_COMMAND}` passes")
+            acceptance.append(f"`{config.DEFAULT_TEST_COMMAND}` passes")
         elif kind == "scrape":
             acceptance.append("rows are extracted, sorted and saved as JSON or CSV")
         else:
@@ -193,5 +189,5 @@ def make_plan_offline(request: str, project_dir: Path, request_id: str | None = 
         tasks.append(Task(id=_new_id("t"), request_id=request_id, title=p[:80], detail=p, kind=kind,
                           files_hint=_guess_hints(p, project_dir) if kind != "scrape" else [],
                           acceptance=acceptance))
-    return Plan(id=_new_id("p"), request_id=request_id, tasks=tasks, test_command=DEFAULT_TEST_COMMAND,
+    return Plan(id=_new_id("p"), request_id=request_id, tasks=tasks, test_command=config.DEFAULT_TEST_COMMAND,
                 summary=f"{len(tasks)} task(s) from request [planner: offline heuristic]")

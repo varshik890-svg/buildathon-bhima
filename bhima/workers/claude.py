@@ -6,6 +6,7 @@ multi-line prompts on Windows). Never uses bypass/skip-permissions flags.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from .. import config
@@ -82,14 +83,24 @@ class ClaudeWorker:
                              error="claude not installed")
         prompt = build_prompt(task, pack, feedback, self.test_command)
         cmd = build_cmd(exe, route)
-        code, out, err, secs, timed_out = run_cli(cmd, Path(workdir), stdin_text=prompt)
-        if code != 0 and "max-turns" in err and "unknown option" in err.lower():
-            cmd = build_cmd(exe, route, max_turns=False)
-            code, out, err, secs, timed_out = run_cli(cmd, Path(workdir), stdin_text=prompt)
+        unsupported_options = []
+        secs = 0.0
+        while True:
+            code, out, err, elapsed, timed_out = run_cli(cmd, Path(workdir), stdin_text=prompt)
+            secs += elapsed
+            unknown = re.search(r"""unknown option\s*:?\s*['"]?(--effort|--max-turns)(?![\w-])""",
+                                err, re.IGNORECASE)
+            option = unknown.group(1).lower() if unknown else None
+            if code == 0 or timed_out or option not in cmd:
+                break
+            index = cmd.index(option)
+            del cmd[index:index + 2]
+            unsupported_options.append(option)
         msg = parse_output(out)
         raw_path = save_raw(self.name, task.id, round, {
             "cmd": cmd, "prompt": prompt, "returncode": code, "stdout": out,
-            "stderr": err, "duration_s": secs, "timed_out": timed_out})
+            "stderr": err, "duration_s": secs, "timed_out": timed_out,
+            "unsupported_options": unsupported_options})
         report = str(msg.get("result") or "")
         is_error = bool(msg.get("is_error")) or code != 0 or not msg
         error = None

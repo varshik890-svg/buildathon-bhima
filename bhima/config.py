@@ -2,18 +2,25 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 STATE_DIR = ROOT / ".bhima"
 DB_PATH = STATE_DIR / "state.db"
-WORKSPACES_DIR = STATE_DIR / "workspaces"
 RUNS_DIR = STATE_DIR / "runs"
 LOGS_DIR = STATE_DIR / "logs"
 DEMO_DIR = ROOT / "demo"
 TEMPLATE_DIR = DEMO_DIR / "template"
 DEMO_TASKS = DEMO_DIR / "tasks.json"
 
+
+def _workspaces_dir() -> Path:
+    data_dir = Path(os.environ["LOCALAPPDATA"]) if sys.platform == "win32" else Path.home() / ".local" / "share"
+    return data_dir / "bhima" / "workspaces"
+
+
+WORKSPACES_DIR = _workspaces_dir()
 DEFAULT_WORKSPACE = "demo"
 DEFAULT_TEST_COMMAND = "python -m pytest -q"
 MAX_RETRIES = 2            # same CLI, failure fed back
@@ -23,12 +30,12 @@ CONTEXT_BUDGET_TOKENS = 6000
 CLAUDE_ALLOWED_TOOLS = "Read,Edit,Write,Glob,Grep,Bash(python -m pytest*)"
 CLAUDE_MAX_TURNS = 30
 
-_loaded = False
+_env_values: dict[str, str] | None = None
 
 
 def load_env(path: Path | None = None) -> dict[str, str]:
-    """Read KEY=VALUE lines from .env into os.environ (existing vars win)."""
-    global _loaded
+    """Read .env into the harness configuration without exporting it."""
+    global _env_values
     path = path or (ROOT / ".env")
     values: dict[str, str] = {}
     if path.exists():
@@ -41,15 +48,19 @@ def load_env(path: Path | None = None) -> dict[str, str]:
             if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
                 val = val[1:-1]
             values[key] = val
-            os.environ.setdefault(key, val)
-    _loaded = True
+    _env_values = values
     return values
 
 
 def get(key: str, default: str = "") -> str:
-    if not _loaded:
-        load_env()
-    return os.environ.get(key, default)
+    values = _env_values if _env_values is not None else load_env()
+    return os.environ.get(key, values.get(key, default))
+
+
+def child_env() -> dict[str, str]:
+    secret_markers = ("TOKEN", "KEY", "SECRET", "PASSWORD")
+    return {name: value for name, value in os.environ.items()
+            if not any(marker in name.upper() for marker in secret_markers)}
 
 
 def ensure_dirs() -> None:

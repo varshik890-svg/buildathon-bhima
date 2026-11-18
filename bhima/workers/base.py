@@ -73,7 +73,7 @@ def run_cli(cmd: list[str], cwd: Path, timeout: int = config.WORKER_TIMEOUT_S,
     try:
         proc = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True,
                               encoding="utf-8", errors="replace", timeout=timeout,
-                              input=stdin_text)
+                              input=stdin_text, env=config.child_env())
         return proc.returncode, proc.stdout or "", proc.stderr or "", time.time() - start, False
     except subprocess.TimeoutExpired as exc:
         out = exc.stdout.decode("utf-8", "replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
