@@ -1,8 +1,7 @@
 """Telegram front end for Bhima (python-telegram-bot v22, async API).
 
-Only the owner chat (TELEGRAM_CHAT_ID) is served. Everything else is ignored
-silently and logged. Orchestrator calls are blocking, so they run through
-asyncio.to_thread and never block the event loop.
+Only the configured owner in the configured chat is served. Orchestrator calls
+run through asyncio.to_thread to keep the event loop responsive.
 
 Run with `python -m bhima bot` (cli.py calls run_bot()).
 """
@@ -13,9 +12,9 @@ import asyncio
 import importlib
 import io
 import logging
-import os
-from pathlib import Path
 from typing import Any, Callable
+
+from . import config
 
 log = logging.getLogger("bhima.telegram")
 
@@ -46,36 +45,10 @@ HELP_TEXT = (
 
 # ---------------------------------------------------------------- config ---
 
-def _read_dotenv(path: Path) -> dict[str, str]:
-    values: dict[str, str] = {}
-    if not path.exists():
-        return values
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, val = line.partition("=")
-        values[key.strip()] = val.strip().strip('"').strip("'")
-    return values
-
-
-def load_settings() -> tuple[str, str]:
-    """Return (token, chat_id). Prefers bhima.config, then env, then .env."""
-    token = chat_id = ""
-    try:
-        cfg = importlib.import_module("bhima.config")
-        if callable(getattr(cfg, "get", None)):
-            token = str(cfg.get("TELEGRAM_BOT_TOKEN") or "")
-            chat_id = str(cfg.get("TELEGRAM_CHAT_ID") or "")
-        else:
-            token = str(getattr(cfg, "TELEGRAM_BOT_TOKEN", "") or "")
-            chat_id = str(getattr(cfg, "TELEGRAM_CHAT_ID", "") or "")
-    except Exception:  # config not ready or broken: fall back
-        pass
-    dotenv = _read_dotenv(Path(__file__).resolve().parent.parent / ".env")
-    token = token or os.environ.get("TELEGRAM_BOT_TOKEN", "") or dotenv.get("TELEGRAM_BOT_TOKEN", "")
-    chat_id = chat_id or os.environ.get("TELEGRAM_CHAT_ID", "") or dotenv.get("TELEGRAM_CHAT_ID", "")
-    return token.strip(), chat_id.strip()
+def load_settings() -> tuple[str, str, str]:
+    return (config.get("TELEGRAM_BOT_TOKEN").strip(),
+            config.get("TELEGRAM_CHAT_ID").strip(),
+            config.get("TELEGRAM_OWNER_ID").strip())
 
 
 def parse_chat_id(raw: str) -> int | None:
@@ -277,8 +250,10 @@ class Backend:
 # ------------------------------------------------------------------- bot ---
 
 class BhimaBot:
-    def __init__(self, token: str, owner_id: int | None, backend: Backend | None = None) -> None:
+    def __init__(self, token: str, chat_id: int, backend: Backend | None = None,
+                 *, owner_id: int | None = None) -> None:
         self.token = token
+        self.chat_id = chat_id
         self.owner_id = owner_id
         self.backend = backend or Backend()
         self.app: Any = None
@@ -289,20 +264,24 @@ class BhimaBot:
     def _allowed(self, update: Any) -> bool:
         chat = getattr(update, "effective_chat", None)
         chat_id = getattr(chat, "id", None)
-        if is_owner(chat_id, self.owner_id):
+        user_id = getattr(getattr(update, "effective_user", None), "id", None)
+        owner = self.owner_id
+        if owner is None and getattr(chat, "type", None) == "private":
+            owner = self.chat_id
+        if is_owner(chat_id, self.chat_id) and is_owner(user_id, owner):
             return True
         log.warning("ignored update from chat %s", chat_id)
         return False
 
     # ---- sending
     async def send_text(self, text: str, reply_markup: Any = None, filename: str = "bhima.txt") -> None:
-        if self.app is None or self.owner_id is None:
+        if self.app is None:
             return
         bot = self.app.bot
         if len(text) > DOCUMENT_THRESHOLD or looks_like_diff(text):
             name = "diff.patch" if looks_like_diff(text) else filename
             await bot.send_document(
-                chat_id=self.owner_id,
+                chat_id=self.chat_id,
                 document=io.BytesIO(text.encode("utf-8")),
                 filename=name,
                 caption=text.splitlines()[0][:200] if text else None,
@@ -312,7 +291,7 @@ class BhimaBot:
         chunks = split_message(text)
         for i, chunk in enumerate(chunks):
             last = i == len(chunks) - 1
-            await bot.send_message(chat_id=self.owner_id, text=chunk,
+            await bot.send_message(chat_id=self.chat_id, text=chunk,
                                    reply_markup=reply_markup if last else None)
 
     def approval_keyboard(self, target_id: str) -> Any:
@@ -451,15 +430,15 @@ class BhimaBot:
         await query.answer(f"{action} {target}...")
         fn = self.backend.approve if action == "approve" else self.backend.deny
         try:
-            await asyncio.to_thread(fn, target)
-            note = "Approved" if action == "approve" else "Denied"
+            note = await asyncio.to_thread(fn, target) or "Backend returned no result."
         except Exception as exc:
             log.exception("%s failed", action)
             note = f"{action} failed: {type(exc).__name__}: {exc}"
         try:
             old = query.message.text or query.message.caption or ""
             if query.message.text:
-                await query.edit_message_text(f"{old}\n\n-> {note}"[:MAX_MESSAGE])
+                suffix = f"\n\n-> {note}"[:MAX_MESSAGE]
+                await query.edit_message_text(old[:MAX_MESSAGE - len(suffix)] + suffix)
             else:
                 await query.edit_message_reply_markup(reply_markup=None)
                 await self.send_text(f"{target}: {note}")
@@ -467,14 +446,15 @@ class BhimaBot:
             await self.send_text(f"{target}: {note}")
 
     async def on_error(self, update: Any, context: Any) -> None:
-        log.error("telegram error: %s", getattr(context, "error", None))
+        if update is None or self._allowed(update):
+            log.error("telegram error: %s", getattr(context, "error", None))
 
     # ---- app
     def build_app(self) -> Any:
         from telegram.ext import (Application, CallbackQueryHandler, CommandHandler,
                                   MessageHandler, filters)
         app = Application.builder().token(self.token).build()
-        owner = filters.Chat(chat_id=self.owner_id)
+        owner = filters.Chat(chat_id=self.chat_id)
         commands = {
             "start": self.cmd_start, "help": self.cmd_help, "ask": self.cmd_ask,
             "status": self.cmd_status, "report": self.cmd_report,
@@ -510,52 +490,23 @@ class BhimaBot:
             await app.shutdown()
 
 
-# ------------------------------------------------------ chat-id discovery ---
-
-async def discover_chat_id(token: str) -> None:
-    """No TELEGRAM_CHAT_ID yet: print the chat id of whoever sends /start
-    to the terminal (never to Telegram) and refuse everything else."""
-    from telegram.ext import Application, MessageHandler, filters
-
-    async def show(update: Any, context: Any) -> None:
-        chat = update.effective_chat
-        msg = update.effective_message
-        if msg is not None and (msg.text or "").strip().startswith("/start"):
-            print(f"\n>>> chat id: {chat.id}  -> put TELEGRAM_CHAT_ID={chat.id} in .env and restart\n")
-        else:
-            log.warning("TELEGRAM_CHAT_ID not set; ignoring update from %s", getattr(chat, "id", None))
-
-    app = Application.builder().token(token).build()
-    app.add_handler(MessageHandler(filters.ALL, show))
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling()
-    print("TELEGRAM_CHAT_ID is empty. Send /start to the bot from your account; "
-          "the chat id will be printed here. Ctrl-C to stop.")
-    try:
-        await asyncio.Event().wait()
-    finally:
-        await app.updater.stop()
-        await app.stop()
-        await app.shutdown()
-
-
 def run_bot() -> int:
     """Entry point for `python -m bhima bot`."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)  # its URLs contain the token
-    token, raw_chat = load_settings()
+    token, raw_chat, raw_owner = load_settings()
     if not token:
         print("TELEGRAM_BOT_TOKEN is missing. Add it to .env (see .env.example).")
         return 1
-    owner = parse_chat_id(raw_chat) if raw_chat else None
+    chat_id, owner_id = parse_chat_id(raw_chat), parse_chat_id(raw_owner)
+    if not chat_id:
+        print("Set TELEGRAM_CHAT_ID to the chat ID in .env.")
+        return 1
+    if (raw_owner or chat_id < 0) and (owner_id is None or owner_id <= 0):
+        print("Set TELEGRAM_OWNER_ID to the owner's numeric user ID in .env.")
+        return 1
     try:
-        if owner is None:
-            if raw_chat:
-                print("TELEGRAM_CHAT_ID is not a number; running chat-id discovery.")
-            asyncio.run(discover_chat_id(token))
-        else:
-            asyncio.run(BhimaBot(token, owner).run())
+        asyncio.run(BhimaBot(token, chat_id, owner_id=owner_id).run())
     except KeyboardInterrupt:
         print("Bot stopped.")
     return 0
