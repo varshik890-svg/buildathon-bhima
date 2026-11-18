@@ -552,6 +552,7 @@ def test_planner_and_worker_get_clean_child_environment(tmp_path, monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", run)
     monkeypatch.setattr(planner, "_claude_exe", lambda: "fake-planner")
+    monkeypatch.setattr(planner.talker, "chat", lambda *args, **kwargs: None)
     wbase.run_cli(["fake-worker"], tmp_path)
     planner.make_plan("question", tmp_path)
     assert calls == ["fake-worker", "fake-planner"]
@@ -571,6 +572,23 @@ def test_report_renders_from_store(make_orch):
     orch.approve("p1")
     text = report.render(orch.store)
     assert "t1" in text and "300" in text  # 2 rounds x 150 tokens
+
+
+def test_planner_source_is_saved_and_shown(make_orch):
+    from bhima.models import plan_from_dict
+
+    plan = make_plan()
+    plan.planned_by = "talker-local"
+    orch, _, events, _ = make_orch({}, plan=plan)
+    rid = orch.submit("fix it")
+    data = orch.store.get_plan(plan.id)["data"]
+    assert data["planned_by"] == "talker-local"
+    assert plan_from_dict(data).planned_by == "talker-local"
+    data.pop("planned_by")
+    assert plan_from_dict(data).planned_by is None
+    event = next(event for event in events if event["kind"] == "plan_ready")
+    assert "planned by: talker-local" in event["text"]
+    assert f"{rid} planned by: talker-local" in report.render(orch.store)
 
 
 def test_demo_tasks_file_is_consistent():

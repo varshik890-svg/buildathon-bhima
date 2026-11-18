@@ -50,6 +50,10 @@ def render(store: Store | None = None) -> str:
         total_rounds = sum(r[3] for r in rows)
         total_s = sum(float(r[6]) for r in rows)
         out.append(f"\nTotal: {len(rows)} task(s), {total_rounds} round(s), {total_tok} tokens, {total_s:.0f}s")
+        for req in store.list_requests():
+            plan = store.plan_for_request(req["id"])
+            if plan and (source := plan["data"].get("planned_by")):
+                out.append(f"{req['id']} planned by: {source}")
         base = config.STATE_DIR / "baseline.json"
         if base.exists():
             out.append("\nBaseline (last run):\n" + render_baseline(json.loads(base.read_text(encoding="utf-8"))))

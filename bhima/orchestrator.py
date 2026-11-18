@@ -44,7 +44,8 @@ def _default_planner(request: str, project_dir: Path, request_id: str) -> Plan:
         return Plan(id=new_id("p"), request_id=request_id,
                     tasks=[Task(id=new_id("t"), request_id=request_id, title=request[:60], detail=request,
                                 kind="code", files_hint=[], acceptance=["all tests pass"])],
-                    test_command=config.DEFAULT_TEST_COMMAND, summary=f"single task (planner unavailable: {exc})")
+                    test_command=config.DEFAULT_TEST_COMMAND, summary=f"single task (planner unavailable: {exc})",
+                    planned_by="offline")
 
 
 def _default_router(task: Task, history: list[RunResult]) -> Route:
@@ -204,7 +205,10 @@ class Orchestrator:
             self.store.save_task(t.id, rid, plan.id, to_dict(t), status="planned")
         aid = self.store.add_approval("plan", plan.id, plan.summary)
         self.store.set_request_status(rid, "awaiting_plan_approval")
-        lines = [f"Plan {plan.id}: {plan.summary}", f"Tests: {plan.test_command}"]
+        lines = [f"Plan {plan.id}: {plan.summary}"]
+        if plan.planned_by:
+            lines.append(f"planned by: {plan.planned_by}")
+        lines.append(f"Tests: {plan.test_command}")
         lines += [f"  {i + 1}. [{t.kind}] {t.id}: {t.title}" for i, t in enumerate(plan.tasks)]
         lines.append(f"Approve with: approve {aid}")
         self.emit("plan_ready", aid, "\n".join(lines), ref=rid, plan_id=plan.id)

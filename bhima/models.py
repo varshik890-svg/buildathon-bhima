@@ -22,6 +22,7 @@ class Plan:
     tasks: list[Task]
     test_command: str
     summary: str
+    planned_by: str | None = None
 
 
 @dataclass
@@ -90,4 +91,5 @@ def plan_from_dict(d: dict) -> Plan:
         tasks=[task_from_dict(t) for t in d.get("tasks", [])],
         test_command=d.get("test_command", "python -m pytest -q"),
         summary=d.get("summary", ""),
+        planned_by=d.get("planned_by"),
     )

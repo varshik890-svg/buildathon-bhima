@@ -1,8 +1,6 @@
 """request -> Plan with 1-3 Tasks.
 
-Uses Claude Code in print mode with a JSON schema at low effort (cheap, a few
-seconds). If claude is missing, fails, or returns junk, a heuristic offline
-planner produces a usable single/multi-task plan so the harness never stalls.
+Tries the local Talker, Claude Haiku, and then the offline heuristic.
 """
 from __future__ import annotations
 
@@ -13,7 +11,7 @@ import subprocess
 import uuid
 from pathlib import Path
 
-from bhima import config
+from bhima import config, talker
 from bhima.models import Plan, Task
 KINDS = ("code", "scrape", "question")
 
@@ -107,12 +105,40 @@ def _claude_exe() -> str | None:
     return shutil.which("claude") or shutil.which("claude.exe")
 
 
+def _valid_talker_plan(data: object) -> bool:
+    if not isinstance(data, dict) or not isinstance(data.get("summary"), str):
+        return False
+    tasks = data.get("tasks")
+    if not isinstance(tasks, list) or not 1 <= len(tasks) <= 3:
+        return False
+    for task in tasks:
+        if not isinstance(task, dict) or task.get("kind") not in KINDS:
+            return False
+        if not all(isinstance(task.get(key), str) for key in ("title", "detail")):
+            return False
+        for key in ("files_hint", "acceptance"):
+            items = task.get(key)
+            if not isinstance(items, list) or not all(isinstance(item, str) for item in items):
+                return False
+    return True
+
+
 def make_plan(request: str, project_dir: Path, request_id: str | None = None, timeout: int = 120) -> Plan:
     project_dir = Path(project_dir)
     request_id = request_id or _new_id("r")
+    prompt = PROMPT.format(files="\n".join(_list_files(project_dir)) or "(empty)", request=request)
+    response = talker.chat([{"role": "user", "content": prompt}], json_schema=PLAN_SCHEMA)
+    try:
+        data = json.loads(response) if response is not None else None
+    except (ValueError, RecursionError):
+        data = None
+    if _valid_talker_plan(data):
+        plan = _to_plan(data, request, project_dir, request_id)
+        plan.planned_by = "talker-local"
+        return plan
+
     exe = _claude_exe()
     if exe:
-        prompt = PROMPT.format(files="\n".join(_list_files(project_dir)) or "(empty)", request=request)
         cmd = [exe, "-p", "--output-format", "json", "--model", "haiku", "--effort", "low",
                "--tools", "", "--disallowedTools", "*", "--strict-mcp-config",
                "--json-schema", json.dumps(PLAN_SCHEMA)]
@@ -129,8 +155,9 @@ def make_plan(request: str, project_dir: Path, request_id: str | None = None, ti
             if isinstance(data, dict) and data.get("tasks"):
                 plan = _to_plan(data, request, project_dir, request_id)
                 plan.summary = plan.summary + " [planner: claude haiku]"
+                plan.planned_by = "claude-haiku"
                 return plan
-        except (subprocess.SubprocessError, OSError, ValueError):
+        except (subprocess.SubprocessError, OSError, ValueError, AttributeError, TypeError):
             pass
     return make_plan_offline(request, project_dir, request_id)
 
@@ -190,4 +217,4 @@ def make_plan_offline(request: str, project_dir: Path, request_id: str | None = 
                           files_hint=_guess_hints(p, project_dir) if kind != "scrape" else [],
                           acceptance=acceptance))
     return Plan(id=_new_id("p"), request_id=request_id, tasks=tasks, test_command=config.DEFAULT_TEST_COMMAND,
-                summary=f"{len(tasks)} task(s) from request [planner: offline heuristic]")
+                summary=f"{len(tasks)} task(s) from request [planner: offline heuristic]", planned_by="offline")

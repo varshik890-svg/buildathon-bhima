@@ -238,6 +238,7 @@ def test_planner_offline_fallback(proj):
 
 
 def test_planner_falls_back_when_claude_missing(proj, monkeypatch):
+    monkeypatch.setattr(planner.talker, "chat", lambda *args, **kwargs: None)
     monkeypatch.setattr(planner, "_claude_exe", lambda: None)
     p = planner.make_plan("What does Cart do?", proj)
     assert p.tasks[0].kind == "question" and "offline" in p.summary
@@ -250,6 +251,7 @@ def test_planner_parses_json_from_result_text(proj):
 
 
 def test_planner_disables_tools_and_reads_request_from_stdin(proj, monkeypatch):
+    monkeypatch.setattr(planner.talker, "chat", lambda *args, **kwargs: "{not JSON}")
     from types import SimpleNamespace
 
     request = "a multiline request\nwith more details"
@@ -263,4 +265,6 @@ def test_planner_disables_tools_and_reads_request_from_stdin(proj, monkeypatch):
         return SimpleNamespace(stdout='{"structured_output": {"tasks": [{"title": "fake plan"}]}}')
 
     monkeypatch.setattr(planner.subprocess, "run", run)
-    assert planner.make_plan(request, proj).tasks[0].title == "fake plan"
+    plan = planner.make_plan(request, proj)
+    assert plan.tasks[0].title == "fake plan"
+    assert plan.planned_by == "claude-haiku"
