@@ -118,11 +118,66 @@ See [RULES.md](RULES.md) for the full list.
 
 ## Your project
 
-_Replace this section with your project README:_
-- **Team:**
-- **Track:**
-- **Problem:** who faces it and why it happens
-- **What we built:** the core workflow
-- **The hardest part:** how we solved it
-- **How to run it:**
-- **Demo / screenshots:**
+# Bhima Harness: first-try-right for coding agents
+
+- **Team:** bhima (varshik890-svg)
+- **Track:** Build for AI Agents (`ai-agents`)
+
+### Problem: who has it and why it happens
+
+Developers who hand coding tasks to agents like **Claude Code** and **Codex** often get a first answer that is wrong, or only *looks* right. This isn't the model being lazy. There are three structural reasons:
+1. **The context is wrong.** The agent gets too much, too little, or the wrong files, so it fixes the wrong place.
+2. **Nothing checks the work before it says "done".** Tests aren't run against the real acceptance criteria, and the agent's hidden assumptions are never shown.
+3. **The human only sees the result at the end.** There's no plan checkpoint, and no record of which model, effort level or route actually works for which kind of task.
+
+Every miss costs another round, more subscription usage and more trust.
+
+### What we built
+
+`bhima` is a harness that sits **around** Claude Code (`claude -p`) and Codex (`codex exec`):
+
+| Step | What Bhima does |
+|---|---|
+| Plan | Turns the request into small tasks. The human approves the plan (CLI or Telegram button). The planner has no tools. |
+| **Route** | Picks the **CLI, model and effort level** per task: the GLiDE decision model first (typed `choice`/`noul`/`score` questions with a confidence score), then a rule table. It escalates after failures and switches CLI after repeated failures. |
+| **Context** | Builds a **context pack**: a repo map, **BM25F-ranked files** with a "why these files" list, memory and the skill index, all within a token budget. |
+| Run | Runs the worker on a task branch in a separate workspace repo, with a fixed allowed-tools list and a cleaned environment. |
+| **Check** | Runs the visible tests **and the hidden acceptance tests** on a clean checkout of the candidate commit. The agent must end with an `## Assumptions:` list. A failure is fed back for a retry. |
+| Approve | The human approves the merge of the **exact commit SHA** that was checked. Bhima never pushes. |
+| **Remember** | Hermes-style persistent memory (`memory/MEMORY.md`, `memory/USER.md`, size caps, proposals the human approves) and skills (`skills/*/SKILL.md`, progressive loading), rebuilt from the idea. |
+| Report | Rounds, tokens, time and pass rate per task and per route, plus a **baseline**: plain `claude -p` against Bhima on the same seeded tasks. |
+| Telegram | `@Bhima_varshik_bot`, owner only: `/ask`, `/status`, `/report`, `/memory`, `/skills`, `/scrape`, and Approve and Deny buttons. |
+
+There's also a **scrape-and-sort tool** (`python -m bhima.scrape <url> --sort <column>`) that pulls tables and lists out of web pages, sorted with number awareness.
+
+### The hardest part
+
+**Getting the right context to the agent and proving the result, cheaply.** Three pieces:
+- **Context ranking:** BM25F over paths, symbol definitions and contents, with bonuses for files the task mentions, test-to-module pairing and a token budget. On the seeded tasks, it found 10 of the 11 needed files without any hints.
+- **The check loop:** hidden acceptance tests run on a clean checkout of the candidate commit, so an agent can't "pass" by editing the tests or leaving stray files behind. Failures go back into both the retry and the router's history.
+- **Routing by outcome:** the router learns from real outcomes (failed checks count as failures), so effort and model escalate only when needed.
+
+### How to run it
+
+```powershell
+python -m venv .venv; .\.venv\Scripts\pip install -r requirements.txt
+copy .env.example .env      # fill TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_OWNER_ID
+.\.venv\Scripts\python -m pytest -q                 # harness tests
+.\.venv\Scripts\python -m bhima demo t1             # one seeded task end to end
+.\.venv\Scripts\python -m bhima approve <id>        # approve the plan, then the merge
+.\.venv\Scripts\python -m bhima report              # rounds / tokens / time per task
+.\.venv\Scripts\python -m bhima baseline            # plain claude -p vs bhima
+.\.venv\Scripts\python -m bhima bot                 # Telegram
+```
+
+You need Claude Code and Codex logged in. GLiDE is optional: `scripts/run_glide.sh` serves GLiDE-0.4B locally, and without it the rule router is used.
+
+### Demo
+
+_Baseline results and the demo script are added after the live run._
+
+### Honest limits (today)
+
+- Workers run on the host with fixed tools and a clean environment, but **without OS-level filesystem isolation**. The next step is to run them inside a bubblewrap jail (WSL2).
+- Git metadata in the workspace can be reached by the worker. The plan is a separate trusted checkout.
+- Native-Windows Codex blocks commands in non-interactive mode, so the Codex worker is meant to run from WSL.
