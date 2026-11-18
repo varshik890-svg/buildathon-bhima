@@ -46,6 +46,24 @@
       "files_hint": ["data/supplier_prices.html", "invoice/catalog.py"],
       "acceptance": ["6 rows parsed", "price is float, stock is int", "sorted by price desc gives RC-01 first"],
       "hidden_test": "hidden_tests/test_hidden_t5.py"
+    },
+    {
+      "id": "t6",
+      "kind": "code",
+      "title": "Fix cent discrepancies in displayed invoice totals",
+      "detail": "The amount shown by amount_due(invoice) in invoice/invoice.py is off by a cent on some multi-line orders. The billing rule is to add the taxable line totals for each GST rate, round the GST for each rate to two decimals, and add those amounts to the subtotal. Keep the existing Rs formatting.",
+      "files_hint": ["invoice/invoice.py", "invoice/tax.py", "invoice/pricing.py"],
+      "acceptance": ["GST is rounded once per rate", "amount_due displays the exact total for single-rate and mixed-rate invoices", "all tests pass"],
+      "hidden_test": "hidden_tests/test_hidden_t6.py"
+    },
+    {
+      "id": "t7",
+      "kind": "code",
+      "title": "Handle pasted and unknown discount codes",
+      "detail": "Fix discount_rate(code) in invoice/discounts.py. Customers can paste discount codes with leading or trailing whitespace and any letter case. Preserve the existing rates for known codes. If the code is unknown, raise ValueError with a message that includes the trimmed code as the customer entered it, preserving its case.",
+      "files_hint": ["invoice/discounts.py", "tests/test_discounts.py"],
+      "acceptance": ["known codes match regardless of case or surrounding whitespace", "unknown codes raise ValueError naming the trimmed code with its original case", "all tests pass"],
+      "hidden_test": "hidden_tests/test_hidden_t7.py"
     }
   ]
 }

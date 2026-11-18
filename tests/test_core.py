@@ -593,7 +593,7 @@ def test_planner_source_is_saved_and_shown(make_orch):
 
 def test_demo_tasks_file_is_consistent():
     data = json.loads((Path(__file__).resolve().parent.parent / "demo" / "tasks.json").read_text())
-    assert len(data["tasks"]) == 5
+    assert [t["id"] for t in data["tasks"]] == ["t1", "t2", "t3", "t4", "t5", "t6", "t7"]
     kinds_ = {t["kind"] for t in data["tasks"]}
     assert "scrape" in kinds_
     for t in data["tasks"]:
@@ -604,7 +604,7 @@ def test_demo_template_tests_pass_and_hidden_tests_fail(tmp_path):
     ws = gitops.create_workspace("tpl", base_dir=tmp_path)
     ok, out = checks.run_tests(ws)
     assert ok, out
-    for tid in ("t1", "t2", "t3", "t4", "t5"):
+    for tid in ("t1", "t2", "t3", "t4", "t5", "t6", "t7"):
         passed, _ = checks.verify_hidden(tid, ws)
         assert passed is False, tid
     assert not gitops.has_changes(ws)
