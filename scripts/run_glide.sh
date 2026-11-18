@@ -14,7 +14,15 @@ if [ ! -f "$MODEL_DIR/glide/server.py" ]; then
   exit 1
 fi
 
+if [ ! -x "$PY" ]; then
+  echo "Python not found at $PY. One-time setup:" >&2
+  echo "  python3 -m venv ~/venvs/glide-small && ~/venvs/glide-small/bin/pip install -r $MODEL_DIR/requirements.txt uvicorn" >&2
+  exit 1
+fi
+
 cd "$MODEL_DIR"
+# Bhima sends GLIDE_KEY as a bearer token; the server checks GLIDE_API_KEY.
+if [ -n "${GLIDE_KEY:-}" ] && [ -z "${GLIDE_API_KEY:-}" ]; then export GLIDE_API_KEY="$GLIDE_KEY"; fi
 export GLIDE_MODEL="$MODEL_DIR"
 export GLIDE_DEVICE="${GLIDE_DEVICE:-cuda}"
 # One request at a time is plenty for routing; keeps answers deterministic.
