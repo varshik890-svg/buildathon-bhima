@@ -5,6 +5,7 @@
   approve <id> / deny <id> decide a pending plan / merge / memory / retry approval
   status                   requests, tasks and pending approvals
   dash [--once]            live terminal dashboard
+  tui                      interactive chat and live harness dashboard
   report                   rounds, tokens and time per task
   reset                    recreate the demo workspace from demo/template
   bot                      start the Telegram bot (same process runs the orchestrator)
@@ -92,6 +93,12 @@ def cmd_report(args) -> int:
 def cmd_dash(args) -> int:
     from .dashboard import run
     run(once=args.once, interval=args.interval)
+    return 0
+
+
+def cmd_tui(args) -> int:
+    from .tui import run
+    run()
     return 0
 
 
@@ -205,6 +212,7 @@ def main(argv: list[str] | None = None) -> int:
     dash.add_argument("--once", action="store_true", help="print one plain-text frame")
     dash.add_argument("--interval", type=_positive_interval, default=1.0, help="seconds between frames")
     dash.set_defaults(fn=cmd_dash)
+    sub.add_parser("tui", help="chat with Bhima and watch the harness live").set_defaults(fn=cmd_tui)
     sub.add_parser("report").set_defaults(fn=cmd_report)
     sub.add_parser("reset").set_defaults(fn=cmd_reset)
     sub.add_parser("bot").set_defaults(fn=cmd_bot)
