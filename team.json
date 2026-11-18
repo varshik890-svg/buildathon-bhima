@@ -1,9 +1,9 @@
 {
-  "team_name": "CHANGE_ME",
-  "project_title": "CHANGE_ME",
-  "one_liner": "CHANGE_ME: one sentence about what you're building",
-  "track": "CHANGE_ME: physical-world | ai-agents | area-of-expertise",
+  "team_name": "bhima",
+  "project_title": "Bhima Harness",
+  "one_liner": "A harness around Claude Code and Codex that plans, routes, builds the right context, checks the work and keeps the human in the loop, so coding agents get it right the first time.",
+  "track": "ai-agents",
   "members": [
-    { "name": "CHANGE_ME", "github": "CHANGE_ME" }
+    { "name": "varshik890-svg", "github": "varshik890-svg" }
   ]
 }
