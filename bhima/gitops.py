@@ -1,6 +1,6 @@
 ﻿"""Git operations on the *workspace* repo (never on the Bhima repo, never push).
 
-A workspace is `.bhima/workspaces/<name>`, its own git repo created from
+A workspace is its own git repo under the user's data directory, created from
 demo/template. Each task works on branch `bhima/task-<id>`; approved SHAs are
 merged into `main` with --no-ff.
 """
@@ -13,7 +13,7 @@ from pathlib import Path
 from . import config
 
 MAIN = "main"
-WS_GITIGNORE = ".bhima/\n__pycache__/\n*.pyc\n.pytest_cache/\n"
+WS_GITIGNORE = ".bhima/\n.env\n.venv/\n__pycache__/\nnode_modules/\nbuild/\ndist/\n*.pyc\n.pytest_cache/\n"
 
 
 class GitError(RuntimeError):
@@ -42,14 +42,14 @@ def create_workspace(name: str = config.DEFAULT_WORKSPACE, template: Path | None
                      reset: bool = False, base_dir: Path | None = None) -> Path:
     """Copy the template into a fresh git repo with one initial commit on main."""
     template = Path(template or config.TEMPLATE_DIR)
-    ws = Path(base_dir or config.WORKSPACES_DIR) / name
+    ws = workspace_path(name) if base_dir is None else Path(base_dir) / name
     if ws.exists() and reset:
         _rmtree(ws)
     if (ws / ".git").exists():
         return ws
     ws.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(template, ws, dirs_exist_ok=True,
-                    ignore=shutil.ignore_patterns("__pycache__", ".pytest_cache", "*.pyc"))
+                    ignore=shutil.ignore_patterns(*WS_GITIGNORE.replace("/", "").splitlines()))
     (ws / ".gitignore").write_text(WS_GITIGNORE, encoding="utf-8")
     git(ws, "init", "-q", "-b", MAIN)
     git(ws, "add", "-A")
@@ -76,9 +76,9 @@ def head_sha(ws: Path, ref: str = "HEAD") -> str:
     return git(ws, "rev-parse", ref).stdout.strip()
 
 
-def start_task_branch(ws: Path, task_id: str) -> str:
+def start_task_branch(ws: Path, task_id: str, *, branch: str | None = None) -> str:
     """Create (or reuse) the task branch off main and check it out."""
-    br = branch_name(task_id)
+    br = branch or branch_name(task_id)
     git(ws, "checkout", "-q", MAIN)
     exists = git(ws, "rev-parse", "--verify", "--quiet", br, check=False).returncode == 0
     if exists:

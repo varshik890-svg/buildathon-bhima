@@ -1,4 +1,4 @@
-﻿"""Checks: run the plan's test command in the workspace and parse "## Assumptions:".
+﻿"""Checks: run the project's test command and parse "## Assumptions:".
 
 `verify_hidden` additionally runs a demo task's hidden acceptance test (from
 demo/hidden_tests) against the workspace, then removes it again. Used by the
@@ -11,9 +11,10 @@ import shlex
 import shutil
 import subprocess
 import sys
+from tempfile import TemporaryDirectory
 from pathlib import Path
 
-from . import config
+from . import config, gitops
 from .models import CheckResult, Task
 
 _HEADING = re.compile(r"^\s*#{1,6}\s*assumptions\s*:?\s*$|^\s*\**\s*assumptions\s*:?\s*\**\s*:?\s*$", re.I)
@@ -57,7 +58,8 @@ def run_tests(workdir: Path, test_command: str = config.DEFAULT_TEST_COMMAND,
     cmd = _split_command(test_command) + list(extra_args or [])
     try:
         proc = subprocess.run(cmd, cwd=str(workdir), capture_output=True, text=True,
-                              encoding="utf-8", errors="replace", timeout=config.CHECK_TIMEOUT_S)
+                              encoding="utf-8", errors="replace", timeout=config.CHECK_TIMEOUT_S,
+                              env=config.child_env())
     except subprocess.TimeoutExpired:
         return False, f"tests timed out after {config.CHECK_TIMEOUT_S}s"
     except FileNotFoundError as exc:
@@ -80,8 +82,7 @@ def hidden_test_for(task_id: str, tasks_file: Path | None = None) -> Path | None
     base_id = str(task_id).split("-")[0]  # "t1-3fa2c1" (a run of demo task t1) -> "t1"
     for t in json.loads(tasks_file.read_text(encoding="utf-8")).get("tasks", []):
         if str(t.get("id")) == base_id and t.get("hidden_test"):
-            p = tasks_file.parent / t["hidden_test"]
-            return p if p.exists() else None
+            return tasks_file.parent / t["hidden_test"]
     return None
 
 
@@ -90,13 +91,29 @@ def verify_hidden(task_id: str, workdir: Path, hidden: Path | None = None) -> tu
     hidden = hidden or hidden_test_for(task_id)
     if not hidden:
         return None, "no hidden test"
-    dest = Path(workdir) / "tests" / hidden.name
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy(hidden, dest)
+    if not hidden.is_file():
+        return False, f"missing hidden acceptance test: {hidden.name}"
+    with TemporaryDirectory(dir=workdir, prefix="bhima-hidden-") as tmp:
+        dest = Path(tmp) / hidden.name
+        shutil.copy(hidden, dest)
+        return run_tests(Path(workdir), extra_args=[dest.relative_to(workdir).as_posix()])
+
+
+def verify_hidden_commit(task_id: str, workdir: Path, sha: str) -> tuple[bool | None, str]:
+    """Run the seeded acceptance test against a clean checkout of the candidate."""
+    hidden = hidden_test_for(task_id)
+    if hidden is None:
+        return None, "no hidden test"
     try:
-        return run_tests(Path(workdir), f"python -m pytest -q {dest.relative_to(workdir).as_posix()}")
-    finally:
-        dest.unlink(missing_ok=True)
+        with TemporaryDirectory(prefix="bhima-acceptance-") as tmp:
+            checkout = Path(tmp) / "candidate"
+            gitops.git(workdir, "worktree", "add", "--quiet", "--detach", str(checkout), sha)
+            try:
+                return verify_hidden(task_id, checkout, hidden)
+            finally:
+                gitops.git(workdir, "worktree", "remove", "--force", str(checkout))
+    except (gitops.GitError, OSError) as exc:
+        return False, f"cannot verify hidden acceptance test: {exc}"
 
 
 def failure_feedback(check: CheckResult, error: str | None = None) -> str:
